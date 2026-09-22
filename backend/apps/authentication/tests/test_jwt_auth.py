@@ -184,3 +184,72 @@ class JWTAuthAPITests(TestCase):
         # Verify cookies are expired/deleted
         self.assertEqual(response.cookies["access_token"].value, "")
         self.assertEqual(response.cookies["refresh_token"].value, "")
+
+    def test_csrf_token_endpoint_provides_valid_token(self):
+        """Verify GET /api/v1/auth/csrf/ returns CSRF token for SPAs."""
+        response = self.client.get("/api/v1/auth/csrf/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("csrf_token", response.data)
+        self.assertTrue(len(response.data["csrf_token"]) > 0)
+
+    def test_cookie_authenticated_mutating_request_without_csrf_fails_403(self):
+        """Verify mutating request using access_token cookie without CSRF header is rejected."""
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        refresh = RefreshToken.for_user(self.user)
+        csrf_client.cookies["access_token"] = str(refresh.access_token)
+
+        response = csrf_client.patch(
+            "/api/v1/auth/me/",
+            {"first_name": "ForgedName"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("CSRF Failed", response.data.get("detail", ""))
+
+    def test_cookie_authenticated_mutating_request_with_csrf_succeeds(self):
+        """Verify mutating request using access_token cookie succeeds with valid CSRF token."""
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        csrf_response = csrf_client.get("/api/v1/auth/csrf/")
+        csrf_token = csrf_response.data["csrf_token"]
+
+        refresh = RefreshToken.for_user(self.user)
+        csrf_client.cookies["access_token"] = str(refresh.access_token)
+        csrf_client.cookies["csrftoken"] = csrf_token
+
+        response = csrf_client.patch(
+            "/api/v1/auth/me/",
+            {"first_name": "UpdatedAbena"},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["first_name"], "UpdatedAbena")
+        self.assertEqual(response.data["full_name"], "UpdatedAbena Osei")
+
+    def test_bearer_token_authenticated_mutating_request_exempt_from_csrf(self):
+        """Verify mutating request using Bearer header is exempt from CSRF checks."""
+        refresh = RefreshToken.for_user(self.user)
+        access_token = str(refresh.access_token)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+        response = self.client.patch(
+            "/api/v1/auth/me/",
+            {"first_name": "BearerUser"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["first_name"], "BearerUser")
+
+    def test_expired_cookie_falls_back_to_bearer_header(self):
+        """Verify that an invalid/expired access_token cookie falls through to Bearer header."""
+        refresh = RefreshToken.for_user(self.user)
+        access_token = str(refresh.access_token)
+
+        # Set an invalid or expired cookie
+        self.client.cookies["access_token"] = "invalid.expired.jwt.token"
+        # Provide valid Bearer credentials in Authorization header
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+
+        response = self.client.get("/api/v1/auth/me/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["email"], self.email)

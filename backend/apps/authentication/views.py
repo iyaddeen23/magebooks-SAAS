@@ -1,6 +1,7 @@
 """Views for JWT authentication and session cookie management."""
 
 from django.conf import settings
+from django.middleware.csrf import get_token
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.request import Request
@@ -9,7 +10,11 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.authentication.serializers import LoginSerializer, UserResponseSerializer
+from apps.authentication.serializers import (
+    LoginSerializer,
+    UserResponseSerializer,
+    UserUpdateSerializer,
+)
 
 
 def set_jwt_cookies(
@@ -78,9 +83,11 @@ class LoginView(APIView):
         refresh_token = str(refresh)
 
         user_data = UserResponseSerializer(user).data
+        csrf_token = get_token(request)
         response = Response(
             {
                 "user": user_data,
+                "csrf_token": csrf_token,
                 "detail": "Login successful.",
             },
             status=status.HTTP_200_OK,
@@ -88,6 +95,16 @@ class LoginView(APIView):
 
         set_jwt_cookies(response, access_token=access_token, refresh_token=refresh_token)
         return response
+
+
+class CSRFTokenView(APIView):
+    """Provide a fresh CSRF token and cookie for single-page applications."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request: Request) -> Response:
+        csrf_token = get_token(request)
+        return Response({"csrf_token": csrf_token}, status=status.HTTP_200_OK)
 
 
 class RefreshTokenView(APIView):
@@ -144,3 +161,10 @@ class CurrentUserView(APIView):
     def get(self, request: Request) -> Response:
         serializer = UserResponseSerializer(request.user)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request: Request) -> Response:
+        """Update mutable profile details for currently authenticated user."""
+        serializer = UserUpdateSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UserResponseSerializer(request.user).data, status=status.HTTP_200_OK)

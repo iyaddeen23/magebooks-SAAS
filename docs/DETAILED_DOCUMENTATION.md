@@ -27,6 +27,7 @@
    - 4.5 Complete RESTful API Endpoint Catalog
    - 4.6 Payment Rails & Banking POS Integration Architecture
    - 4.7 GRA E-VAT Clearance Integration
+   - 4.8 Misuse Case Threat Modeling & Automated CI/CD Security Architecture
 5. [Part 5: Architectural & Workflow Diagrams](#part-5-architectural--workflow-diagrams)
    - 5.1 System Architecture Diagram
    - 5.2 Multi-Tenant Entity-Relationship Diagram (ERD)
@@ -409,6 +410,7 @@ CREATE TABLE fiscal_periods (
     closed_at TIMESTAMPTZ,
     closed_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
     UNIQUE(organization_id, start_date, end_date)
 );
 
@@ -434,6 +436,7 @@ CREATE TABLE chart_of_accounts (
     currency VARCHAR(3) NOT NULL DEFAULT 'GHS',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
     UNIQUE(organization_id, account_code)
 );
 
@@ -444,7 +447,7 @@ CREATE TABLE chart_of_accounts (
 CREATE TABLE journal_entries (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    period_id UUID NOT NULL REFERENCES fiscal_periods(id),
+    period_id UUID NOT NULL,
     entry_number VARCHAR(50) NOT NULL,                   -- e.g. 'JE-2026-00042'
     entry_date DATE NOT NULL,
     narration TEXT NOT NULL,
@@ -453,7 +456,11 @@ CREATE TABLE journal_entries (
     is_posted BOOLEAN NOT NULL DEFAULT TRUE,
     created_by UUID NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(organization_id, entry_number)
+    UNIQUE(organization_id, id),
+    UNIQUE(organization_id, entry_number),
+    CONSTRAINT fk_journal_entries_period_org
+        FOREIGN KEY (organization_id, period_id)
+        REFERENCES fiscal_periods (organization_id, id)
 );
 
 CREATE TABLE journal_lines (
@@ -484,7 +491,8 @@ CREATE TABLE contacts (
     tin VARCHAR(20),                                      -- Tax Identification Number
     ghana_card_number VARCHAR(25),
     billing_address TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id)
 );
 
 -- ============================================================================
@@ -494,7 +502,7 @@ CREATE TABLE contacts (
 CREATE TABLE invoices (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    customer_id UUID NOT NULL REFERENCES contacts(id),
+    customer_id UUID NOT NULL,
     invoice_number VARCHAR(50) NOT NULL,
     issue_date DATE NOT NULL,
     due_date DATE NOT NULL,
@@ -508,7 +516,11 @@ CREATE TABLE invoices (
     status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',            -- 'DRAFT','PENDING_GRA','CLEARED','PARTIAL','PAID','OVERDUE','VOID'
     gra_clearance_code VARCHAR(100),                        -- GRA E-VAT QR / clearance verification
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(organization_id, invoice_number)
+    UNIQUE(organization_id, id),
+    UNIQUE(organization_id, invoice_number),
+    CONSTRAINT fk_invoices_customer_org
+        FOREIGN KEY (organization_id, customer_id)
+        REFERENCES contacts (organization_id, id)
 );
 
 CREATE TABLE invoice_items (
@@ -528,7 +540,7 @@ CREATE TABLE invoice_items (
 CREATE TABLE bills (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    supplier_id UUID NOT NULL REFERENCES contacts(id),
+    supplier_id UUID NOT NULL,
     bill_number VARCHAR(50) NOT NULL,
     bill_date DATE NOT NULL,
     due_date DATE NOT NULL,
@@ -536,7 +548,11 @@ CREATE TABLE bills (
     withholding_tax_amount NUMERIC(18, 4) NOT NULL DEFAULT 0.0000,
     paid_amount NUMERIC(18, 4) NOT NULL DEFAULT 0.0000,
     status VARCHAR(30) NOT NULL DEFAULT 'UNPAID',          -- 'UNPAID','PARTIAL','PAID','OVERDUE'
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
+    CONSTRAINT fk_bills_supplier_org
+        FOREIGN KEY (organization_id, supplier_id)
+        REFERENCES contacts (organization_id, id)
 );
 
 -- ============================================================================
@@ -552,11 +568,24 @@ CREATE TABLE payment_transactions (
     transaction_date TIMESTAMPTZ NOT NULL,
     reference_number VARCHAR(100),                         -- Bank/MoMo network transaction ID
     terminal_id VARCHAR(50),                               -- POS terminal ID for bank card machines
-    contact_id UUID REFERENCES contacts(id),
-    invoice_id UUID REFERENCES invoices(id),
-    bill_id UUID REFERENCES bills(id),
+    contact_id UUID,
+    invoice_id UUID,
+    bill_id UUID,
     created_by UUID NOT NULL REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
+    CONSTRAINT fk_payment_contact_org
+        FOREIGN KEY (organization_id, contact_id)
+        REFERENCES contacts (organization_id, id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_payment_invoice_org
+        FOREIGN KEY (organization_id, invoice_id)
+        REFERENCES invoices (organization_id, id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_payment_bill_org
+        FOREIGN KEY (organization_id, bill_id)
+        REFERENCES bills (organization_id, id)
+        ON DELETE SET NULL
 );
 
 -- ============================================================================
@@ -572,13 +601,14 @@ CREATE TABLE employees (
     tin VARCHAR(20),
     basic_salary NUMERIC(18, 4) NOT NULL,
     allowances NUMERIC(18, 4) NOT NULL DEFAULT 0.0000,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id)
 );
 
 CREATE TABLE payroll_runs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    period_id UUID NOT NULL REFERENCES fiscal_periods(id),
+    period_id UUID NOT NULL,
     total_gross_salary NUMERIC(18, 4) NOT NULL,
     total_ssnit_tier1 NUMERIC(18, 4) NOT NULL,             -- 13.5% employer
     total_ssnit_tier2 NUMERIC(18, 4) NOT NULL,             -- 5.0% employee
@@ -586,7 +616,11 @@ CREATE TABLE payroll_runs (
     total_net_payout NUMERIC(18, 4) NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'DRAFT',           -- 'DRAFT','APPROVED','DISBURSED'
     executed_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
+    CONSTRAINT fk_payroll_period_org
+        FOREIGN KEY (organization_id, period_id)
+        REFERENCES fiscal_periods (organization_id, id)
 );
 
 -- ============================================================================
@@ -596,15 +630,25 @@ CREATE TABLE payroll_runs (
 CREATE TABLE prior_period_rectifications (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    closed_period_id UUID NOT NULL REFERENCES fiscal_periods(id),
-    target_journal_entry_id UUID REFERENCES journal_entries(id),
-    rectification_journal_id UUID NOT NULL REFERENCES journal_entries(id),
+    closed_period_id UUID NOT NULL,
+    target_journal_entry_id UUID,
+    rectification_journal_id UUID NOT NULL,
     reason TEXT NOT NULL,
     justification_document_url VARCHAR(500),
     requested_by UUID NOT NULL REFERENCES users(id),
     approved_by UUID REFERENCES users(id),
     status VARCHAR(20) NOT NULL DEFAULT 'PENDING',        -- 'PENDING','APPROVED','REJECTED'
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_rectification_period_org
+        FOREIGN KEY (organization_id, closed_period_id)
+        REFERENCES fiscal_periods (organization_id, id),
+    CONSTRAINT fk_rectification_target_je_org
+        FOREIGN KEY (organization_id, target_journal_entry_id)
+        REFERENCES journal_entries (organization_id, id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_rectification_je_org
+        FOREIGN KEY (organization_id, rectification_journal_id)
+        REFERENCES journal_entries (organization_id, id)
 );
 
 -- ============================================================================
@@ -810,6 +854,25 @@ Under Ghana Revenue Authority compliance mandates, VAT-registered businesses mus
   * Calculated levies (NHIL, GETFund, COVID-19) and VAT
 - Transmit to GRA E-VAT API.
 - Store the returned **GRA Clearance Code** and generate a compliant **QR Code** embedded onto the final invoice PDF.
+
+---
+
+## 4.8 Misuse Case Threat Modeling & Automated CI/CD Security Architecture
+
+To guarantee institutional-grade financial security and satisfy Ghanaian regulatory compliance (including the Data Protection Act, Act 843 and Bank of Ghana cybersecurity guidelines), Mage Books incorporates formal Misuse Case Threat Modeling. Rather than relying solely on positive functional requirements, the system defines explicit negative anti-requirements and defensive countermeasures across all transactional entry points:
+
+| Misuse Case ID | Target Asset & Vector | Threat Description & Impact | Defensive Countermeasure | Verification Method |
+| :--- | :--- | :--- | :--- | :--- |
+| **MUC-1.1** | **MoMo Settlement Underpayment** | Attacker sends partial payment (e.g. GHS 1.00 on GHS 1,200 invoice) hoping reference match auto-clears AR balance. | Strict Decimal matching (`amount == invoice.total_amount`). Routes partial payments to `PARTIALLY_PAID` and discrepancies to Suspense Account 2150. | Automated abuse test in `tests/security/test_momo_security.py` |
+| **MUC-1.2** | **Webhook HMAC Signature Forgery** | Attacker submits forged webhook payload to `/api/v1/payments/webhooks/momo/` to credit invoices without depositing fiat funds. | Constant-time HMAC-SHA256 signature verification (`hmac.compare_digest`) rejecting non-matching payloads with HTTP 401 Unauthorized. | Tampered signature test in `tests/security/test_webhook_security.py` |
+| **MUC-2.1** | **Cross-Tenant BOLA/IDOR Header Spoof** | User in Tenant A tampers with `X-Tenant-ID` header sending Tenant B's UUID to inspect competitor financial ledgers. | `TenantSecurityMiddleware` Stages 3-4 verifies active membership in requested tenant; rejects unauthorized cross-tenant requests with HTTP 403. | Cross-tenant penetration test in `tests/security/test_tenancy_security.py` |
+| **MUC-2.2** | **RLS Connection Pool Leak** | Pooled database connection retains previous request's tenant context and leaks to subsequent request on same connection. | Middleware executes `SET LOCAL app.current_tenant_id` inside transaction; connection pool resets session parameter automatically upon transaction end. | Multi-tenant sequential connection leak test in SQLite/Postgres |
+| **MUC-3.1** | **PWA Cache Physical Dump** | Attacker inspects browser IndexedDB / Dexie.js cache on stolen merchant phone to dump customer TINs and sales history. | Client-side field-level encryption using WebCrypto API (AES-GCM 256-bit) for sensitive PII before persisting to local offline cache. | Playwright automated PWA storage inspection test in CI |
+| **MUC-4.1** | **PDF Engine SSRF Vulnerability** | Attacker submits customer name containing `<img src='http://169.254.169.254/latest/meta-data/'>` to leak internal cloud metadata during PDF compile. | Explicit programmatic URL fetcher disabling (`disabled_url_fetcher`) preventing ReportLab/WeasyPrint from performing outbound network calls. | SSRF payload injection test in `tests/security/test_pdf_security.py` |
+| **MUC-5.1** | **Payroll Maker Self-Approval Collusion** | Accountant creates payroll run and attempts to approve own payment disbursal without independent administrative check. | Anti-self-approval validation enforcing `maker_id != checker_id` at model and API view levels; blocks self-approval with HTTP 403 Forbidden. | Self-approval attempt test in `tests/security/test_payroll_security.py` |
+| **MUC-5.2** | **TOTP 2FA Replay & Race Condition** | Attacker intercepts 6-digit TOTP code and replays it within 30s drift window; concurrent approval threads bypass authorization. | Single-use TOTP consumption cache in Redis (60s TTL) plus distributed Redis mutex on `payroll_id` during approval transaction. | Concurrent replay test in `tests/security/test_payroll_security.py` |
+
+These threat vectors are enforced through automated Continuous Integration quality gates (`.github/workflows/security.yml`), combining Gitleaks (secret detection), Bandit (Python SAST), pip-audit (SCA dependency auditing), and a dedicated negative abuse test suite running in SQLite.
 
 ---
 
