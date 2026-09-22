@@ -252,16 +252,20 @@ Mage Books derives its competitive advantage from deep, native compliance with t
 - **Ghana Card**: The primary legal identity document for citizens and residents. Format: `GHA-XXXXXXXXX-X` (where X is a digit). Required for all business directors.
 - **Business TIN (Taxpayer Identification Number)**: Mandatory identifier issued by the GRA. Format: 11 characters prefixed by letter `C` (Company) or `P` (Individual/Sole Trader), e.g., `C0001234567`.
 
-### 2. The Ghanaian Value Added Tax (VAT) System:
-- **Registration Threshold**: Mandatory for businesses making taxable supplies exceeding **GHS 200,000** over a 12-month period, or **GHS 50,000** over 3 months.
-- **VAT Schemes**:
-  * **Standard Rate Scheme (Effective Rate: ~21.9%)**:
-    1. National Health Insurance Levy (NHIL): **2.5%** on taxable supply.
-    2. Ghana Education Trust Fund (GETFund): **2.5%** on taxable supply.
-    3. COVID-19 Health Recovery Levy: **1.0%** on taxable supply.
-    4. Value Added Tax (VAT): **15.0%** charged on `(Taxable Supply + NHIL + GETFund + COVID-19 Levy)`.
-  * **VAT Flat Rate Scheme (VFRS)**:
-    - Applicable to retail traders and wholesalers of goods: **3% VAT + 1% COVID-19 Levy = 4% flat** on the gross value of goods sold (no input tax deduction).
+### 2. The Ghanaian Value Added Tax (VAT) System (Act 1151 - Effective Jan 1, 2026):
+- **Registration Threshold**: Mandatory for businesses making taxable supplies exceeding **GHS 750,000** over a 12-month period (raised from GHS 200,000 under Act 1151).
+- **Statutory Tax Rates & Simplifications**:
+  * **Unified Standard Rate (20.0% Non-Cascading)**:
+    1. Standard VAT: **15.0%** on base taxable supply.
+    2. National Health Insurance Levy (NHIL): **2.5%** on base taxable supply (input-deductible).
+    3. Ghana Education Trust Fund (GETFund): **2.5%** on base taxable supply (input-deductible).
+    *Total Unified Rate = 15.0% + 2.5% + 2.5% = 20.0% flat on taxable supply (cascading calculation eliminated).*
+  * **Abolished Schemes**:
+    - COVID-19 Health Recovery Levy (1.0%): **Permanently abolished**.
+    - VAT Flat Rate Scheme (VFRS - 3%/4%): **Permanently abolished**; all VAT-registered businesses operate under the unified system.
+  * **Alternative Supply Classifications**:
+    - **EXEMPT**: Non-taxable supplies under the First Schedule of Act 1151.
+    - **ZERO_RATED**: Taxable at 0% (e.g. exports of goods and services).
 
 ### 3. Withholding Tax (WHT):
 - Standard Ghanaian rates applied on supplier disbursements:
@@ -357,7 +361,7 @@ CREATE TABLE organizations (
     phone VARCHAR(20) NOT NULL,                   -- e.g. +233240000000
     email VARCHAR(255) NOT NULL,
     vat_registered BOOLEAN NOT NULL DEFAULT FALSE,
-    vat_scheme VARCHAR(20) DEFAULT 'STANDARD',    -- 'STANDARD' (21.9%) or 'FLAT_RATE' (4%)
+    vat_scheme VARCHAR(20) DEFAULT 'STANDARD',    -- 'STANDARD' (Act 1151 Unified 20.0%), 'EXEMPT', 'ZERO_RATED'
     default_experience_mode VARCHAR(20) DEFAULT 'simple', -- 'simple' or 'full'
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1098,27 +1102,27 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    StartSupply([Line Item Taxable Supply: e.g., GHS 1,000.00]) --> SchemeCheck{Business VAT Scheme?}
+    StartSupply([Line Item Taxable Supply: e.g., GHS 1,000.00]) --> ThresholdCheck{VAT Registered? Turnover >= GHS 750,000}
     
-    SchemeCheck -->|Non-VAT Registered| NoTax[No VAT or Levies Applied\nTotal Invoice = GHS 1,000.00]
+    ThresholdCheck -->|No / Non-VAT Registered| NoTax[No VAT or Levies Applied\nTotal Customer Invoice = GHS 1,000.00]
     
-    SchemeCheck -->|Flat Rate Scheme - 4%| FlatRate[Apply Flat Rate\n3% VAT Flat + 1% COVID Levy]
-    FlatRate --> TotalFlat[Tax = GHS 40.00\nTotal Invoice = GHS 1,040.00]
+    ThresholdCheck -->|Yes / VAT Registered| SupplyType{Supply Statutory Status?}
     
-    SchemeCheck -->|Standard Rate Scheme| CalcLevies[Calculate Statutory Levies on Taxable Supply]
+    SupplyType -->|EXEMPT| Exempt[Zero Tax Applied - Exempt Supply\nTotal Customer Invoice = GHS 1,000.00]
+    SupplyType -->|ZERO_RATED| ZeroRated[0.0% Tax Applied - Exports\nTotal Customer Invoice = GHS 1,000.00]
     
-    CalcLevies --> NHIL["NHIL (2.5%): GHS 25.00"]
-    CalcLevies --> GETFund["GETFund (2.5%): GHS 25.00"]
-    CalcLevies --> COVID["COVID-19 Health Levy (1.0%): GHS 10.00"]
+    SupplyType -->|STANDARD Rate| CalcAct1151[Calculate Act 1151 Unified 20.0% Taxes on Base Supply]
     
-    NHIL & GETFund & COVID --> SumLevies[Total Levies = GHS 60.00]
+    CalcAct1151 --> NHIL["NHIL (2.5%): GHS 25.00 (Input-Deductible)"]
+    CalcAct1151 --> GETFund["GETFund (2.5%): GHS 25.00 (Input-Deductible)"]
+    CalcAct1151 --> VAT["Standard VAT (15.0%): GHS 150.00"]
+    CalcAct1151 --> COVID["COVID-19 Levy: GHS 0.00 (Abolished)"]
     
-    SumLevies --> VATBase[Determine Standard VAT Base\nSupply + Levies = GHS 1,060.00]
-    VATBase --> StandardVAT["Calculate Standard VAT (15% on GHS 1,060.00)\nVAT = GHS 159.00"]
+    NHIL & GETFund & VAT & COVID --> SumTaxes[Total Unified Statutory Taxes = GHS 200.00 (20.0% Flat)]
     
-    StandardVAT --> TotalStandard["Total Statutory Taxes = GHS 219.00 (Effective 21.9%)\nTotal Customer Invoice = GHS 1,219.00"]
+    SumTaxes --> TotalStandard["Total Customer Invoice = GHS 1,200.00"]
     
-    TotalStandard --> OutputJournal["Post Double-Entry Ledger Splitting:\n- Dr Accounts Receivable: GHS 1,219.00\n- Cr Sales Revenue: GHS 1,000.00\n- Cr NHIL Payable: GHS 25.00\n- Cr GETFund Payable: GHS 25.00\n- Cr COVID Levy Payable: GHS 10.00\n- Cr VAT Output Tax Payable: GHS 159.00"]
+    TotalStandard --> OutputJournal["Post Double-Entry Ledger Splitting:\n- Dr Accounts Receivable: GHS 1,200.00\n- Cr Sales Revenue: GHS 1,000.00\n- Cr NHIL Output Payable: GHS 25.00\n- Cr GETFund Output Payable: GHS 25.00\n- Cr VAT Output Tax Payable: GHS 150.00"]
 ```
 
 ---
