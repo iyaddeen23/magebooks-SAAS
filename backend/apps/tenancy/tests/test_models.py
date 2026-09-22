@@ -4,7 +4,6 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 
@@ -139,12 +138,13 @@ class TenancyModelTests(TestCase):
             role=RoleChoices.OWNER,
         )
 
-        with self.assertRaises(IntegrityError):
+        with self.assertRaises(ValidationError) as ctx:
             OrganizationMembership.objects.create(
                 organization=org,
                 user=self.user,
                 role=RoleChoices.ADMIN,
             )
+        self.assertIn("already exists", str(ctx.exception))
 
     def test_organization_owner_property(self):
         """Organization.owner returns the user with the active OWNER membership."""
@@ -211,10 +211,75 @@ class TenancyModelTests(TestCase):
             role=RoleChoices.OWNER,
             access_expires_at=timezone.now() + timedelta(days=90),
         )
+        # full_clean called on save() must block persisting invalid owner state
         with self.assertRaises(ValidationError) as ctx:
-            membership.clean()
+            membership.save()
 
         self.assertIn("access_expires_at", ctx.exception.message_dict)
+
+        # objects.create() must also be blocked
+        with self.assertRaises(ValidationError) as ctx:
+            OrganizationMembership.objects.create(
+                organization=org,
+                user=self.other_user,
+                role=RoleChoices.OWNER,
+                access_expires_at=timezone.now() + timedelta(days=30),
+            )
+        self.assertIn("access_expires_at", ctx.exception.message_dict)
+
+    def test_owner_demotion_prevented_by_immutability_guard(self):
+        """Owner Immutability: Attempting to demote an existing OWNER raises ValidationError."""
+        org = Organization.objects.create(
+            name="Sunyani Solar Ltd",
+            phone="+233352111222",
+            email="solar@sunyani.com",
+        )
+        membership = OrganizationMembership.objects.create(
+            organization=org,
+            user=self.user,
+            role=RoleChoices.OWNER,
+        )
+
+        # Attempt to demote OWNER to ADMIN
+        membership.role = RoleChoices.ADMIN
+        with self.assertRaises(ValidationError) as ctx:
+            membership.save()
+
+        self.assertIn("role", ctx.exception.message_dict)
+        self.assertEqual(
+            ctx.exception.message_dict["role"],
+            ["Organization Owner cannot be demoted to another role."],
+        )
+
+        # Attempt to demote OWNER to BOOKKEEPER
+        membership.role = RoleChoices.BOOKKEEPER
+        with self.assertRaises(ValidationError) as ctx:
+            membership.save()
+
+        self.assertIn("role", ctx.exception.message_dict)
+
+    def test_owner_deactivation_prevented_by_immutability_guard(self):
+        """Owner Immutability: Attempting to deactivate an existing OWNER raises ValidationError."""
+        org = Organization.objects.create(
+            name="Wa Water Works",
+            phone="+233392000111",
+            email="water@wa.com",
+        )
+        membership = OrganizationMembership.objects.create(
+            organization=org,
+            user=self.user,
+            role=RoleChoices.OWNER,
+        )
+
+        membership.is_active = False
+        with self.assertRaises(ValidationError) as ctx:
+            membership.save()
+
+        self.assertIn("is_active", ctx.exception.message_dict)
+        self.assertEqual(
+            ctx.exception.message_dict["is_active"],
+            ["Organization Owner cannot be deactivated."],
+        )
 
     def test_cascade_deletion(self):
         """Deleting an organization or a user cascades to delete their memberships."""

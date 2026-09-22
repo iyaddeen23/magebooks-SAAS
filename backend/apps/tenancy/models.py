@@ -181,3 +181,25 @@ class OrganizationMembership(models.Model):
             raise ValidationError(
                 {"access_expires_at": "Owner role cannot have an access expiration date."}
             )
+
+        # Owner immutability: Prevent demotion or deactivation of an existing OWNER
+        if self.pk:
+            orig = (
+                OrganizationMembership.objects.filter(pk=self.pk)
+                .values("role", "is_active")
+                .first()
+            )
+            if orig and orig["role"] == RoleChoices.OWNER:
+                if self.role != RoleChoices.OWNER:
+                    raise ValidationError(
+                        {"role": "Organization Owner cannot be demoted to another role."}
+                    )
+                if not self.is_active:
+                    raise ValidationError(
+                        {"is_active": "Organization Owner cannot be deactivated."}
+                    )
+
+    def save(self, *args, **kwargs):
+        """Enforce domain invariants and validation rules on all save operations."""
+        self.full_clean()
+        super().save(*args, **kwargs)
