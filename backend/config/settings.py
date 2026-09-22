@@ -105,6 +105,8 @@ if IS_TESTING:
             "NAME": ":memory:",
         }
     }
+    # Fast password hasher to accelerate automated test suite (<2s vs 60s+)
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 elif DEBUG:
     # Safe fallback for local development with DEBUG=True
     DATABASES = {
