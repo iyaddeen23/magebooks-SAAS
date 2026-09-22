@@ -13,22 +13,33 @@ import environ
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 1. Initialize environ with explicit type casting and safe fallback defaults
-env = environ.Env(
-    DJANGO_DEBUG=(bool, False),
-    DJANGO_SECRET_KEY=(str, "django-insecure-magebooks-dev-key-change-in-production"),
-    DJANGO_ALLOWED_HOSTS=(list, ["*"]),
-    DJANGO_CORS_ALLOWED_ORIGINS=(list, ["http://localhost:3000"]),
-)
+# 1. Initialize environ
+env = environ.Env()
 
 # 2. Read .env file from BASE_DIR if present (does not fail if missing)
 environ.Env.read_env(BASE_DIR / ".env")
 
-# 3. Pull Core Variables
-SECRET_KEY = env("DJANGO_SECRET_KEY")
-DEBUG = env("DJANGO_DEBUG")
-ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
-CORS_ALLOWED_ORIGINS = env("DJANGO_CORS_ALLOWED_ORIGINS")
+# 3. Detect Testing and Debug Modes
+IS_TESTING = "test" in sys.argv or "pytest" in sys.modules
+DEBUG = env.bool("DJANGO_DEBUG", default=False)
+
+# 4. Fail-closed Security Defaults for SECRET_KEY, ALLOWED_HOSTS, and CORS:
+# Fallbacks are strictly restricted to automated test runners or explicit local DEBUG=True.
+# In production (DEBUG=False), missing variables cause an immediate startup crash (fail fast).
+if IS_TESTING or DEBUG:
+    SECRET_KEY = env(
+        "DJANGO_SECRET_KEY",
+        default="django-insecure-magebooks-dev-key-change-in-production",
+    )
+    ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["*"])
+    CORS_ALLOWED_ORIGINS = env.list(
+        "DJANGO_CORS_ALLOWED_ORIGINS",
+        default=["http://localhost:3000"],
+    )
+else:
+    SECRET_KEY = env("DJANGO_SECRET_KEY")
+    ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS")
+    CORS_ALLOWED_ORIGINS = env.list("DJANGO_CORS_ALLOWED_ORIGINS")
 
 # Application definition
 INSTALLED_APPS = [
@@ -87,8 +98,6 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 # Database Routing: In-Memory SQLite for Automated Tests, PostgreSQL for Dev/Prod
-IS_TESTING = "test" in sys.argv or "pytest" in sys.modules
-
 if IS_TESTING:
     DATABASES = {
         "default": {
@@ -96,13 +105,17 @@ if IS_TESTING:
             "NAME": ":memory:",
         }
     }
-else:
+elif DEBUG:
+    # Safe fallback for local development with DEBUG=True
     DATABASES = {
         "default": env.db(
             "DATABASE_URL",
             default="postgres://postgres:postgres@localhost:5432/magebooks_db",
         )
     }
+else:
+    # Production strictly requires DATABASE_URL to prevent silent fallback to default credentials
+    DATABASES = {"default": env.db("DATABASE_URL")}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

@@ -15,8 +15,14 @@ class CoreBootTestCase(SimpleTestCase):
         """Asserts that automated tests run exclusively against in-memory SQLite."""
         db_config = settings.DATABASES["default"]
         self.assertEqual(db_config["ENGINE"], "django.db.backends.sqlite3")
+        db_name = db_config["NAME"]
         self.assertTrue(
-            db_config["NAME"] == ":memory:" or "memory" in db_config["NAME"],
+            db_name == ":memory:"
+            or (
+                isinstance(db_name, str)
+                and db_name.startswith("file:")
+                and "mode=memory" in db_name
+            ),
             f"Expected in-memory SQLite database, got {db_config['NAME']}",
         )
 

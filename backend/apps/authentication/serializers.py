@@ -56,3 +56,11 @@ class UserResponseSerializer(serializers.ModelSerializer):
             "date_joined",
         )
         read_only_fields = fields
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    """Serializer for updating mutable profile fields for CustomUser."""
+
+    class Meta:
+        model = CustomUser
+        fields = ("first_name", "last_name", "phone_number")
