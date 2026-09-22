@@ -577,15 +577,15 @@ CREATE TABLE payment_transactions (
     CONSTRAINT fk_payment_contact_org
         FOREIGN KEY (organization_id, contact_id)
         REFERENCES contacts (organization_id, id)
-        ON DELETE SET NULL,
+        ON DELETE RESTRICT,
     CONSTRAINT fk_payment_invoice_org
         FOREIGN KEY (organization_id, invoice_id)
         REFERENCES invoices (organization_id, id)
-        ON DELETE SET NULL,
+        ON DELETE RESTRICT,
     CONSTRAINT fk_payment_bill_org
         FOREIGN KEY (organization_id, bill_id)
         REFERENCES bills (organization_id, id)
-        ON DELETE SET NULL
+        ON DELETE RESTRICT
 );
 
 -- ============================================================================
@@ -645,7 +645,7 @@ CREATE TABLE prior_period_rectifications (
     CONSTRAINT fk_rectification_target_je_org
         FOREIGN KEY (organization_id, target_journal_entry_id)
         REFERENCES journal_entries (organization_id, id)
-        ON DELETE SET NULL,
+        ON DELETE RESTRICT,
     CONSTRAINT fk_rectification_je_org
         FOREIGN KEY (organization_id, rectification_journal_id)
         REFERENCES journal_entries (organization_id, id)
