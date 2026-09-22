@@ -41,8 +41,53 @@ Crucially, rather than executing a synchronous HTTP call to the Ghana Revenue Au
 
 **1.2 Interaction Sequence Flowchart**
 
-| \[Client\]     \[Cloudflare\]   \[Middleware\]   \[InvoicingAPI\]   \[TaxEngine\]   \[LedgerService\]   \[PostgreSQL\]   \[Celery\]   \[GRA API\]   \[Cloudflare R2\]   |              |              |               |               |              |                |           |          |              |   |--1. POST----\>|              |               |               |              |                |           |          |              |   |              |--2. Forward-\>|               |               |              |                |           |          |              |   |              |              |--3. Auth/RLS-------------------------------------------------\>|           |          |              |   |              |              |   (SET LOCAL app.current\_tenant\_id \= :id)                     |           |          |              |   |              |              |--4. Pass-----\>|               |              |                |           |          |              |   |              |              |               |--5. Calc Tax-\>|              |                |           |          |              |   |              |              |               |\<-6. Returns---| (15% VAT, 2.5% NHIL, 2.5% GETFund)       |          |              |   |              |              |               |               |              |                |           |          |              |   |              |              |               |--7. BEGIN @transaction.atomic----------------\>|           |          |              |   |              |              |               |--8. Insert Invoice (UUIDv7, Luhn Ref, Snapshot)----------\>|           |          |              |   |              |              |               |--9. Post Journal Lines------\>|                |           |          |              |   |              |              |               |                              |--10. Dr AR----\>|           |          |              |   |              |              |               |                              |--11. Cr Rev---\>|           |          |              |   |              |              |               |                              |--12. Cr Taxes-\>|           |          |              |   |              |              |               |\<-13. Journal Committed------------------------|           |          |              |   |              |              |               |--14. COMMIT Transaction (Status: PENDING\_GRA)-\>|          |          |              |   |              |              |               |--15. Dispatch Celery Task: clear\_with\_gra.delay()--------\>|          |              |   |              |              |\<-16. HTTP 201-|               |              |                |           |          |              |   |\<-17. UI Done-|              |  (Fast Response: Ref '84291-6', Status 'PENDING\_GRA')         |           |          |              |   |              |              |               |               |              |                |           |          |              |   |              |              |               |               |              |                |           |--18. POST API---------\>|   |              |              |               |               |              |                |           |\<-19. Cryptographic SDC--|   |              |              |               |               |              |                |           |--20. In-Memory SVG QR--|   |              |              |               |               |              |                |           |--21. Air-Gap PDF Engine|   |              |              |               |               |              |                |           |--22. PUT Object-------\>|   |              |              |               |               |              |                |           |--23. Update Status----\>|   |              |              |               |               |              |                |           |      (Status: CLEARED) | |
-| :---- |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client (PWA)
+    participant Edge as Cloudflare Edge / WAF
+    participant Middleware as TenantSecurityMiddleware
+    participant API as InvoicingAPI
+    participant TaxEngine as Act 1151 TaxEngine
+    participant Ledger as LedgerService
+    participant DB as PostgreSQL (RLS)
+    participant Celery as Celery Task Queue
+    participant GRA as GRA E-VAT Service
+    participant R2 as Cloudflare R2 Storage
+
+    Client->>Edge: POST /api/v1/invoices/ (Invoice Payload)
+    Edge->>Middleware: Forward Request with Security Headers
+    Middleware->>DB: SET LOCAL app.current_tenant_id = :tenant_id
+    Note over Middleware,DB: Session bound to tenant context (MUC-2.2)
+    Middleware->>API: Pass Sanitized Request
+    API->>TaxEngine: Calculate Act 1151 Statutory Taxes
+    TaxEngine-->>API: Returns 15% VAT, 2.5% NHIL, 2.5% GETFund (Unified 20%)
+
+    rect rgb(240, 248, 255)
+    Note over API,DB: Begin Atomic Database Transaction (@transaction.atomic)
+    API->>DB: Insert Invoice (UUIDv7 PK, Luhn Ref e.g. '84291-6', Legal Snapshot)
+    API->>Ledger: Post Balanced Journal Lines
+    Ledger->>DB: Debit Accounts Receivable (1200)
+    Ledger->>DB: Credit Sales Revenue (4000)
+    Ledger->>DB: Credit Statutory Tax Output (2100, 2110, 2120)
+    Ledger-->>API: Journal Committed (Balanced Invariant Verified)
+    API->>DB: Commit Transaction (Status: PENDING_GRA)
+    end
+
+    API->>Celery: Dispatch Async Task clear_with_gra.delay(invoice_id)
+    API-->>Edge: HTTP 201 Created (Ref '84291-6', Status 'PENDING_GRA')
+    Edge-->>Client: Fast UI Response (<150ms)
+
+    rect rgb(255, 250, 240)
+    Note over Celery,R2: Asynchronous Background Clearance Worker
+    Celery->>GRA: Mutual TLS POST /v1/invoice/clearance
+    GRA-->>Celery: Cryptographic Signature & SDC ID
+    Celery->>Celery: Generate In-Memory Vector SVG QR Code
+    Celery->>Celery: Air-Gapped PDF Compilation (SSRF-Safe url_fetcher=None - MUC-4.1)
+    Celery->>R2: S3 API Multipart PUT Invoice PDF
+    Celery->>DB: Update Invoice Status -> CLEARED (SDC ID, QR Code, R2 URL)
+    end
+```
 
 &nbsp;
 
@@ -78,8 +123,58 @@ If the customer omitted the payment reference, entered a typographical error res
 
 **2.2 Interaction Sequence Flowchart**
 
-| \[Customer\]    \[Telco/MoMo\]    \[Gateway (Hubtel/Paystack)\]    \[WebhookAPI\]    \[Redis\]    \[Reconciler\]    \[PostgreSQL\]    \[Notification\]    |               |                     |                       |             |            |               |                 |    |--1. \*170\#----\>|                     |                       |             |            |               |                 |    | (Ref 84291-6) |--2. Debit/Credit---\>|                       |             |            |               |                 |    |               |                     |--3. Webhook Callback-\>|             |            |               |                 |    |               |                     |   (HMAC-SHA256 Signed)|             |            |               |                 |    |               |                     |                       |--4. Check--\>|            |               |                 |    |               |                     |                       |   SET momo:evt:\<id\> EX 60 NX         |                 |    |               |                     |                       |\<-5. OK (Lock Acquired)---|           |                 |    |               |                     |                       |--6. Verify HMAC Signature--------|                 |    |               |                     |                       |--7. Reconcile------------\>|          |                 |    |               |                     |                       |             |            |--8. Check Luhn (84291-6)        |    |               |                     |                       |             |            |     (O(1) Math Verification)    |    |               |                     |                       |             |            |               |                 |    |               |                     |                       |             |            | \[CASE A: Match Found\]           |    |               |                     |                       |             |            |--9. BEGIN @atomic--------------\>|    |               |                     |                       |             |            |--10. Create Payment Record-----\>|    |               |                     |                       |             |            |--11. Dr 1010 MoMo Clearing-----\>|    |               |                     |                       |             |            |--12. Cr 1200 Accounts Rec------\>|    |               |                     |                       |             |            |--13. Set Status: PAID----------\>|    |               |                     |                       |             |            |--14. COMMIT--------------------\>|    |               |                     |                       |             |            |--15. Trigger SMS Alert---------\>|    |               |                     |                       |             |            |                                 |    |               |                     |                       |             |            | \[CASE B: Invalid/Missing Ref\]   |    |               |                     |                       |             |            |--16. BEGIN @atomic-------------\>|    |               |                     |                       |             |            |--17. Dr 1010 MoMo Clearing-----\>|    |               |                     |                       |             |            |--18. Cr 2150 Suspense Account--\>|    |               |                     |                       |             |            |--19. Flag Unreconciled Record--\>|    |               |                     |                       |             |            |--20. COMMIT--------------------\>|    |               |                     |                       |             |            |--21. Send Discrepancy Notice---\>|    |               |                     |                       |\<-22. Done---|            |               |                 |    |               |                     |\<-23. HTTP 200 OK------|             |            |               |                 | |
-| :---- |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Customer as Customer (Mobile Money)
+    participant Telco as Telco USSD (*170#)
+    participant Gateway as Aggregator (Hubtel/Paystack)
+    participant WebhookAPI as MomoWebhookView
+    participant Redis as Redis Lock & Cache
+    participant Reconciler as ReconciliationService
+    participant DB as PostgreSQL (RLS)
+    participant Alert as Notification Service
+
+    Customer->>Telco: Dial *170# and Enter Payment (Ref: '84291-6')
+    Telco->>Gateway: Debit Wallet & Confirm Settlement
+    Gateway->>WebhookAPI: HTTPS POST /api/v1/payments/webhooks/momo/<br/>(HMAC-SHA256 Signed Payload)
+
+    WebhookAPI->>Redis: SET momo:evt:<event_id> EX 60 NX
+    alt Duplicate Webhook Event (Lock Failed)
+        Redis-->>WebhookAPI: Key Already Exists (Lock Denied)
+        WebhookAPI-->>Gateway: HTTP 200 OK (Duplicate Dropped, No Re-Posting)
+    else First-Time Webhook (Lock Acquired)
+        Redis-->>WebhookAPI: OK (Lock Acquired)
+        WebhookAPI->>WebhookAPI: Verify HMAC-SHA256 (Constant-Time hmac.compare_digest)
+        alt Signature Mismatch / Tampered Payload (MUC-1.2)
+            WebhookAPI-->>Gateway: HTTP 401 Unauthorized (Forged Signature Blocked)
+        else Valid Signature
+            WebhookAPI->>Reconciler: Reconcile Payment Event
+            Reconciler->>Reconciler: Validate Luhn Check-Digit (84291-6) in O(1)
+
+            alt Valid Luhn Ref & Invoice Matched & Full Payment (MUC-1.1 Defended)
+                rect rgb(240, 255, 240)
+                Note over Reconciler,DB: Case A: Matched Settlement (@transaction.atomic)
+                Reconciler->>DB: Insert Payment Record (UUIDv7, External Tx ID)
+                Reconciler->>DB: Dr Mobile Money Clearing (1010)
+                Reconciler->>DB: Cr Accounts Receivable (1200)
+                Reconciler->>DB: Update Invoice Status -> PAID
+                Reconciler->>Alert: Send SMS Receipt & Dashboard Notification
+                end
+            else Invalid / Missing Ref OR Partial Underpayment
+                rect rgb(255, 245, 245)
+                Note over Reconciler,DB: Case B: Suspense Account Routing (@transaction.atomic)
+                Reconciler->>DB: Insert Payment Record
+                Reconciler->>DB: Dr Mobile Money Clearing (1010)
+                Reconciler->>DB: Cr Suspense Account (2150)
+                Reconciler->>DB: Flag Unreconciled Deposit
+                Reconciler->>Alert: Urgent Discrepancy Alert to Owner & Accountant
+                end
+            end
+            WebhookAPI-->>Gateway: HTTP 200 OK (<250ms Acknowledgment)
+        end
+    end
+```
 
 &nbsp;
 
@@ -114,8 +209,43 @@ When the Django ORM executes any subsequent SQL query (e.g., 'SELECT \* FROM inv
 
 **3.2 Interaction Sequence Flowchart**
 
-| \[Client\]     \[Cloudflare Edge\]   \[TenantSecurityMiddleware (5 Guards)\]   \[Django View\]   \[PostgreSQL Engine\]   \[DB Pool\]   |                 |                            |                            |                 |                 |   |--1. Request----\>|                            |                            |                 |                 |   |  (JWT Cookie \+  |--2. Forward Header--------\>|                            |                 |                 |   |   X-Tenant-ID)  |                            |--3. GUARD 1: JWT Verify    |                 |                 |   |                 |                            |     (Check Sig & Expire)   |                 |                 |   |                 |                            |--4. GUARD 2: Tenant Header |                 |                 |   |                 |                            |     (UUIDv7 Format Check)  |                 |                 |   |                 |                            |--5. GUARD 3: Membership    |                 |                 |   |                 |                            |     (Active Org Check)     |                 |                 |   |                 |                            |--6. GUARD 4: Auditor Expiry|                 |                 |   |                 |                            |     (now() \< expires\_at)   |                 |                 |   |                 |                            |                            |                 |                 |   |                 |                            |--7. Acquire Connection----------------------------------------\>|   |                 |                            |\<-8. Connection Allocated---------------------------------------|   |                 |                            |--9. GUARD 5: Bind Session Context-----------\>|                 |   |                 |                            |   EXECUTE SQL:                             |                 |   |                 |                            |   SET LOCAL app.current\_tenant\_id \= :id;   |                 |   |                 |                            |\<-10. Context Bound Confirmed-----------------|                 |   |                 |                            |                                            |                 |   |                 |                            |--11. Pass to View---------\>|                 |                 |   |                 |                            |                            |--12. ORM Query-\>|                 |   |                 |                            |                            |   (SELECT...)   |                 |   |                 |                            |                            |                 |--13. Apply RLS--|   |                 |                            |                            |                 |  tenant\_id \=    |   |                 |                            |                            |                 |  current\_setting|   |                 |                            |                            |\<-14. Rows-------|                 |   |                 |                            |\<-15. View Response---------|                 |                 |   |                 |                            |--16. Close Transaction / Auto-Reset Session-\>|                 |   |                 |                            |--17. Release Clean Connection to Pool-------------------------\>|   |\<-18. Response---|                            |                            |                 |                 | |
-| :---- |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Authenticated Client
+    participant Edge as Cloudflare Edge / WAF
+    participant Middleware as TenantSecurityMiddleware (5 Guards)
+    participant View as Django API View
+    participant DB as PostgreSQL Database Engine
+    participant Pool as Database Connection Pool
+
+    Client->>Edge: HTTPS Request (HttpOnly JWT Cookie + X-Tenant-ID Header)
+    Edge->>Middleware: Forward Sanitized Request
+
+    rect rgb(240, 248, 255)
+    Note over Middleware: 5-Stage Defensive Security Pipeline
+    Middleware->>Middleware: GUARD 1: JWT Signature & Expiration Verification (401 on fail)
+    Middleware->>Middleware: GUARD 2: X-Tenant-ID Header Parsing & UUIDv7 Validation (400 on fail)
+    Middleware->>Middleware: GUARD 3: Organization Active Membership Verification (403 on fail - MUC-2.1)
+    Middleware->>Middleware: GUARD 4: Ephemeral Auditor Expiration Check (now() < access_expires_at)
+    end
+
+    Middleware->>Pool: Acquire Database Connection
+    Pool-->>Middleware: Connection Allocated
+    Middleware->>DB: GUARD 5: SET LOCAL app.current_tenant_id = :tenant_id;
+    DB-->>Middleware: Session Context Confirmed
+
+    Middleware->>View: Pass Request to View Handler
+    View->>DB: Execute Standard ORM Query (e.g., SELECT * FROM invoices)
+    Note over DB: PostgreSQL RLS Engine Evaluates Policy:<br/>tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+    DB-->>View: Returns Exclusively Tenant-Owned Rows
+    View-->>Middleware: HTTP 200 OK Response Payload
+
+    Middleware->>DB: Commit / Rollback Transaction (SET LOCAL Auto-Clears - MUC-2.2)
+    Middleware->>Pool: Release Deallocated, Clean Connection to Pool
+    Middleware-->>Edge: HTTP Response with Security Headers (CSP, HSTS)
+    Edge-->>Client: Final Secure Response
+```
 
 &nbsp;
 
@@ -150,8 +280,42 @@ The completed ZIP package is uploaded to Cloudflare R2 under an unguessable UUID
 
 **4.2 Interaction Sequence Flowchart**
 
-| \[Auditor/Owner\]   \[AuditAPI\]   \[Celery Queue\]   \[Celery Worker\]   \[PostgreSQL (RLS)\]   \[Cloudflare R2\]   \[AuditLog\]   \[Client PWA\]       |              |              |                 |                  |                   |              |             |       |--1. POST----\>|              |                 |                  |                   |              |             |       |  (Audit PBC) |--2. Validate |                 |                  |                   |              |             |       |              |--3. Enqueue-\>|                 |                  |                   |              |             |       |              |   (compile\_pbc\_package.delay)  |                  |                   |              |             |       |\<-4. HTTP 202-|              |                 |                  |                   |              |             |       |  (Task UUID) |              |--5. Dispatch---\>|                  |                   |              |             |       |              |              |                 |--6. Bind Tenant-\>|                   |              |             |       |              |              |                 |--7. Stream Ledger Records-----------\>|              |             |       |              |              |                 |\<-8. Raw Data (GL, TB, Tax Returns)---|              |             |       |              |              |                 |--9. Fetch Invoice PDFs--------------\>|              |             |       |              |              |                 |\<-10. PDF Stream----------------------|              |             |       |              |              |                 |--11. Compile Streaming ZIP Archive---|              |             |       |              |              |                 |--12. Calculate SHA-256 Checksum------|              |             |       |              |              |                 |--13. Upload ZIP Archive-------------\>|              |             |       |              |              |                 |--14. Record Audit Log------------------------------\>|             |       |              |              |                 |      (SHA-256, User, Timestamp, Range)              |             |       |              |              |                 |--15. Generate 24hr Presigned URL----\>|              |             |       |              |              |                 |\<-16. Presigned S3/R2 Link------------|              |             |       |              |              |                 |--17. Push Completion Event----------------------------------------\>|       |              |              |                 |                                                             |     |       |--18. GET /api/v1/audit/tasks/\<id\>/--------------------------------------------------------------------------------\>|       |\<-19. Return Status: COMPLETED \+ 24hr Presigned R2 Download Link (Zero Server Egress)-------------------------------|       |--20. Direct Download from Cloudflare R2 Edge (Fast Global CDN)----------------------\>|                            | |
-| :---- |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Auditor as External Auditor / Owner
+    participant API as AuditExportAPIView
+    participant Queue as Celery Task Queue
+    participant Worker as Celery Compilation Worker
+    participant DB as PostgreSQL (RLS Context)
+    participant R2 as Cloudflare R2 Object Storage
+    participant AuditLog as AuditTrail (Immutable Model)
+    participant Client as Client PWA / Browser
+
+    Auditor->>API: POST /api/v1/audit/pbc/ (Fiscal Year, Scopes)
+    API->>API: Validate Role Permissions (Auditor / Owner)
+    API->>Queue: Enqueue Task compile_pbc_package.delay(tenant_id, year, user_id)
+    API-->>Auditor: HTTP 202 Accepted (Task UUID, Status: PROCESSING)
+
+    Queue->>Worker: Worker Picks Up Task
+    Worker->>DB: Bind Tenant Context: SET LOCAL app.current_tenant_id = :tenant_id
+    Worker->>DB: Stream General Ledger, Trial Balance & Act 1151 Tax Schedule (Cursor Streaming)
+    DB-->>Worker: Raw Tabular CSV Streams (Zero RAM Exhaustion)
+    Worker->>R2: S3 API Streaming GET Cleared Invoice PDFs
+    R2-->>Worker: Binary PDF Streams
+    Worker->>Worker: Compress into Structured ZIP Archive in RAM
+    Worker->>Worker: Calculate SHA-256 Cryptographic Checksum over Archive
+
+    Worker->>R2: S3 Multipart PUT /tenants/:id/audit/pbc_:year_:uuid.zip
+    Worker->>AuditLog: Insert Immutable Audit Record (SHA-256 Digest, User, Timestamp)
+    Worker->>R2: Generate 24-Hour Cryptographically Signed Presigned URL
+    R2-->>Worker: Presigned Download Link
+
+    Worker->>Client: Push WebSocket Completion Event (Task UUID, Status: COMPLETED)
+    Client->>API: GET /api/v1/audit/tasks/:id/
+    API-->>Client: Return Status: COMPLETED + 24hr Presigned R2 Download Link
+    Client->>R2: Direct Download via Presigned URL from Cloudflare Edge (Zero Server Egress)
+```
 
 &nbsp;
 
@@ -186,8 +350,57 @@ Upon clicking Approve, the frontend prompts for a 6-digit Time-Based One-Time Pa
 
 **5.2 Interaction Sequence Flowchart**
 
-| \[Maker (Accountant)\]   \[PayrollAPI\]   \[TaxEngine\]   \[PostgreSQL\]   \[Checker (Owner)\]   \[ApprovalAPI\]   \[2FA Guard\]   \[LedgerService\]   \[Disbursal\]         |                  |              |              |                |                 |              |              |              |         |--1. Draft Run---\>|              |              |                |                 |              |              |              |         |                  |--2. Compute-\>|              |                |                 |              |              |              |         |                  |     (SSNIT Tier 1/2, PAYE)  |                |                 |              |              |              |         |                  |\<-3. Deductions--------------|                |                 |              |              |              |         |                  |--4. Insert Payroll (Status: PENDING\_APPROVAL)                                  |              |              |         |                  |     maker\_id \= :maker\_user\_id---------------\>|                                  |              |              |         |\<-5. HTTP 201-----|              |              |                |                 |              |              |              |         |                  |              |              |--6. Alert-----\>|                 |              |              |              |         |                  |              |              |                |--7. Review Run-\>|              |              |              |         |                  |              |              |                |                 |--8. Check Maker \!= Checker---|              |         |                  |              |              |                |                 |     (Anti-Fraud Gate)        |              |         |                  |              |              |                |                 |--9. Prompt Step-Up 2FA------\>|              |         |                  |              |              |                |                 |\<-10. Require TOTP Code-------|              |         |                  |              |              |                |--11. Submit TOTP--------------\>|              |              |         |                  |              |              |                |                 |              |--12. Verify--\>|              |         |                  |              |              |                |                 |              |\<-13. Valid----|              |         |                  |              |              |                |                 |--14. BEGIN @transaction.atomic-------------\>|         |                  |              |              |                |                 |--15. Set Status: APPROVED-------------------\>|         |                  |              |              |                |                 |--16. Post Double-Entry Journal--------------\>|         |                  |              |              |                |                 |      Dr 5000 Gross Wages Expense             |         |                  |              |              |                |                 |      Dr 5010 Employer SSNIT Expense          |         |                  |              |              |                |                 |      Cr 2200 Net Wages Payable               |         |                  |              |              |                |                 |      Cr 2210 PAYE Tax Withholding            |         |                  |              |              |                |                 |      Cr 2220 SSNIT Remittance Payable        |         |                  |              |              |                |                 |--17. COMMIT Transaction---------------------\>|         |                  |              |              |                |                 |--18. Enqueue Bulk Disbursal-----------------\>|         |                  |              |              |                |\<-19. HTTP 200---|              |              |              | |
-| :---- |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Maker as Maker (Accountant / Bookkeeper)
+    participant PayrollAPI as PayrollDraftAPIView
+    participant TaxEngine as Statutory Payroll Engine
+    participant DB as PostgreSQL (RLS)
+    actor Checker as Checker (Business Owner)
+    participant ApprovalAPI as PayrollApprovalAPIView
+    participant AuthGuard as Step-Up 2FA Guard (TOTP)
+    participant Ledger as LedgerService
+    participant Disbursal as Bulk MoMo Disbursal Worker
+
+    Maker->>PayrollAPI: POST /api/v1/payroll/runs/ (Employee Hours, Base Wages)
+    PayrollAPI->>TaxEngine: Compute Deductions (Tier 1 SSNIT 5.5% / 13%, Graduated PAYE)
+    TaxEngine-->>PayrollAPI: Returns Line Items, Net Pay, Statutory Withholdings
+    PayrollAPI->>DB: Insert PayrollRun (Status: PENDING_APPROVAL, maker_id = request.user.id)
+    PayrollAPI-->>Maker: HTTP 201 Created (Draft Run ID)
+
+    PayrollAPI->>Checker: Send High-Priority Review Alert (Email / Push)
+    Checker->>ApprovalAPI: Review Payroll Run Details & Employee Summaries
+
+    Checker->>ApprovalAPI: POST /api/v1/payroll/runs/:id/approve/
+    ApprovalAPI->>ApprovalAPI: Anti-Self-Approval Gate: Assert checker_id != maker_id (MUC-5.1)
+    alt Collusion Attempt: Maker Attempts Self-Approval
+        ApprovalAPI-->>Checker: HTTP 403 Forbidden ("Maker cannot approve own payroll")
+    else Legitimate Checker
+        ApprovalAPI->>AuthGuard: Challenge for 6-Digit TOTP Token
+        AuthGuard-->>Checker: Prompt Authenticator App OTP
+        Checker->>AuthGuard: Submit 6-Digit TOTP Code
+        AuthGuard->>AuthGuard: Verify Code against Secret & Check Redis Single-Use Cache (MUC-5.2)
+        alt Invalid or Replayed TOTP Code
+            AuthGuard-->>Checker: HTTP 401 Unauthorized ("Invalid or expired TOTP code")
+        else Valid TOTP Code
+            rect rgb(240, 248, 255)
+            Note over ApprovalAPI,DB: Begin Atomic Database Transaction (@transaction.atomic)
+            ApprovalAPI->>DB: Update PayrollRun -> APPROVED (checker_id = :id, approved_at = now())
+            ApprovalAPI->>Ledger: Post Balanced Double-Entry Payroll Journal
+            Ledger->>DB: Debit Gross Wages Expense (5000)
+            Ledger->>DB: Debit Employer SSNIT Expense (5010)
+            Ledger->>DB: Credit Net Wages Payable (2200)
+            Ledger->>DB: Credit PAYE Tax Withholding (2210)
+            Ledger->>DB: Credit SSNIT Remittance Payable (2220)
+            ApprovalAPI->>DB: Commit Transaction
+            end
+
+            ApprovalAPI->>Disbursal: Enqueue Async Task execute_bulk_momo_payroll.delay(payroll_id)
+            ApprovalAPI-->>Checker: HTTP 200 OK (Journal ID, Audit Hash, Disbursal Tracking Token)
+        end
+    end
+```
 
 &nbsp;
 

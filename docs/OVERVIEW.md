@@ -12,7 +12,7 @@ While generic international accounting software (such as QuickBooks, Xero, or Fr
 1. **Simple Mode ("Keep it simple")**: Tailored for Ghanaian shop owners, traders, service providers, and non-accountant entrepreneurs. Complex double-entry bookkeeping (debits and credits) is automated completely in the background, presenting clean, jargon-free workflows ("Money I Owe", "Money Owed to Me", "Staff Pay", "Fix a Past Mistake").
 2. **Professional Mode ("I know accounting")**: Built for Chartered Accountants, CFOs, external auditors, and finance teams. Unlocks full access to general ledgers, manual journal entries, customizable Ghanaian Chart of Accounts, fixed asset registers, prior-period adjustments, and audit trails.
 
-Furthermore, Mage Books natively embeds **Ghanaian statutory requirements** from day one—including Ghana Revenue Authority (GRA) Taxpayer Identification Numbers (TIN), the national Ghana Card ID system, and the multi-tier Ghanaian Value Added Tax (VAT), National Health Insurance Levy (NHIL), Ghana Education Trust Fund (GETFund), and COVID-19 Health Recovery Levy.
+Furthermore, Mage Books natively embeds **Ghanaian statutory requirements** from day one—including Ghana Revenue Authority (GRA) Taxpayer Identification Numbers (TIN), the national Ghana Card ID system, and the 2026 **Act 1151 Unified Tax Model**: Standard VAT (15.0%), National Health Insurance Levy (NHIL 2.5%), and Ghana Education Trust Fund (GETFund 2.5%), with the repealed COVID-19 Health Recovery Levy completely eliminated and the VAT registration threshold set to GHS 750,000.
 
 ---
 
@@ -20,13 +20,13 @@ Furthermore, Mage Books natively embeds **Ghanaian statutory requirements** from
 
 ### The Problem
 - **Fragmented Spreadsheets & Paper Ledgers**: The vast majority of Ghanaian Small and Medium Enterprises (SMEs) track sales, inventory, and expenses using physical exercise books or disjointed Excel files.
-- **Complex Statutory Tax Compliance**: Calculating Ghanaian VAT is notoriously error-prone due to compounding levies (NHIL 2.5%, GETFund 2.5%, COVID-19 1%, and VAT 15%) and the distinction between Standard and Flat Rate schemes. Non-compliance results in severe GRA penalties.
+- **Complex Statutory Tax Compliance**: Calculating Ghanaian VAT is error-prone without automated splits (Act 1151: 15% Standard VAT, 2.5% NHIL, 2.5% GETFund = 20.0% unified non-cascading rate) and proper input-tax deductions. Non-compliance results in severe GRA penalties.
 - **Payment Disconnect**: International platforms lack direct integration with Ghana's dominant payment channels: **Mobile Money (MTN MoMo, Telecel Cash, AT Money)** and **local Bank Point-of-Sale (POS) settlement systems**.
 - **The Accounting Knowledge Barrier**: Small business owners avoid software that requires them to understand debits, credits, and ledger balancing.
 
 ### The Mage Books Solution
 - **Zero-Friction Dual Experience**: Start simple without knowing accounting; transition to professional mode anytime without data loss.
-- **Automated GRA Tax Engine**: Built-in calculations for VAT, levies, withholding taxes (WHT), and PAYE/SSNIT payroll deductions.
+- **Automated Act 1151 GRA Tax Engine**: Built-in calculations for VAT, levies, withholding taxes (WHT), and PAYE/SSNIT payroll deductions.
 - **Local Payment Rails**: Designed to ingest transactions from Mobile Money, bank POS terminals, bank transfers, and cash receipts.
 - **On-Demand Certified Accountants**: Built-in "Hire An Expert" marketplace allowing businesses to outsource bookkeeping, audits, and GRA tax filing to certified Ghanaian accountants directly within the app.
 
@@ -140,7 +140,7 @@ The frontend is organized into distinct user journeys:
 ### 2. The 6-Step Onboarding Wizard (`/onboarding`)
 A structured multi-step flow that collects all legal, fiscal, and operational parameters necessary to instantiate a Ghanaian business account:
 1. **Step 1: Company Details**: Business name, Ghana TIN, Ghana Card ID (`GHA-XXXXXXXXX-X`), physical address, Ghanaian telephone (`+233`), and business email.
-2. **Step 2: VAT Status**: GRA VAT registration status with contextual guidance on the GHS 200,000 threshold.
+2. **Step 2: VAT Status**: GRA VAT registration status with contextual guidance on the Act 1151 GHS 750,000 turnover threshold.
 3. **Step 3: Choose Experience**: Explicit choice between "Keep it simple" and "I know accounting".
 4. **Step 4: Fiscal Calendar**: Period length (Monthly, Quarterly, Annually) and an interactive calendar to define the fiscal year-end date.
 5. **Step 5: Chart of Accounts**: Selection between a standard Ghanaian SME template or custom CSV/Excel upload.
@@ -170,12 +170,17 @@ Comprises 18 integrated business sections:
 
 ---
 
-## 7. Next Phase: Backend Development
+## 7. Next Phase: Backend Development & Security Architecture
 
 Currently, Mage Books has a responsive, clean, and complete frontend UI shell with mock state. The critical next phase is **building the production backend** to provide:
-- True multi-tenant isolation and secure authentication.
-- A hardened double-entry relational database engine (PostgreSQL).
-- Automatic calculation of complex Ghanaian taxes (GRA VAT, NHIL, GETFund, COVID-19 Levy, WHT, PAYE).
-- Real-time integrations with Ghanaian Mobile Money, Bank POS systems, and card processors.
+- True multi-tenant isolation via 5-stage `TenantSecurityMiddleware` and PostgreSQL Row-Level Security (RLS).
+- A hardened double-entry relational database engine (PostgreSQL) with sequential UUIDv7 primary keys.
+- Automatic Act 1151 statutory tax calculations (15.0% Standard VAT, 2.5% NHIL, 2.5% GETFund — unified 20.0%, COVID-19 levy abolished).
+- Real-time integrations with Ghanaian Mobile Money, Bank POS systems, and card processors with Luhn check-digit reconciliation.
+- **Misuse Case Threat Modeling & CI/CD Security Pipeline**: 8 automated anti-abuse test gates (Gitleaks secret scanning, Bandit SAST, pip-audit, and negative abuse test suites in `.github/workflows/security.yml`).
 
-*For complete technical specifications, full database schemas, API endpoint listings, and historical logs, consult [`DETAILED_DOCUMENTATION.md`](file:///M:/CODES/Work/magebooks-SAAS/DETAILED_DOCUMENTATION.md).*
+*For complete technical specifications, full database schemas, sequence diagrams, and implementation roadmaps, consult:*
+- [`DETAILED_DOCUMENTATION.md`](file:///M:/CODES/Work/magebooks-SAAS/docs/DETAILED_DOCUMENTATION.md)
+- [`Mage Books SAAS — Comprehensive Engineering Specification & Architecture Manual.docx.md`](file:///M:/CODES/Work/magebooks-SAAS/docs/Mage%20Books%20SAAS%20%E2%80%94%20Comprehensive%20Engineering%20Specification%20&%20Architecture%20Manual.docx.md)
+- [`Mage Books SAAS — Master Transaction Sequence Diagrams & Lifecycle Specification.docx.md`](file:///M:/CODES/Work/magebooks-SAAS/docs/Mage%20Books%20SAAS%20%E2%80%94%20Master%20Transaction%20Sequence%20Diagrams%20&%20Lifecycle%20Specification.docx.md)
+- [`Mage Books SAAS — Master 5-Sprint Implementation Plan.docx.md`](file:///M:/CODES/Work/magebooks-SAAS/docs/Mage%20Books%20SAAS%20%E2%80%94%20Master%205-Sprint%20Implementation%20Plan.docx.md)

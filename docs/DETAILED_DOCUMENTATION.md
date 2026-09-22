@@ -27,6 +27,7 @@
    - 4.5 Complete RESTful API Endpoint Catalog
    - 4.6 Payment Rails & Banking POS Integration Architecture
    - 4.7 GRA E-VAT Clearance Integration
+   - 4.8 Misuse Case Threat Modeling & Automated CI/CD Security Architecture
 5. [Part 5: Architectural & Workflow Diagrams](#part-5-architectural--workflow-diagrams)
    - 5.1 System Architecture Diagram
    - 5.2 Multi-Tenant Entity-Relationship Diagram (ERD)
@@ -251,16 +252,20 @@ Mage Books derives its competitive advantage from deep, native compliance with t
 - **Ghana Card**: The primary legal identity document for citizens and residents. Format: `GHA-XXXXXXXXX-X` (where X is a digit). Required for all business directors.
 - **Business TIN (Taxpayer Identification Number)**: Mandatory identifier issued by the GRA. Format: 11 characters prefixed by letter `C` (Company) or `P` (Individual/Sole Trader), e.g., `C0001234567`.
 
-### 2. The Ghanaian Value Added Tax (VAT) System:
-- **Registration Threshold**: Mandatory for businesses making taxable supplies exceeding **GHS 200,000** over a 12-month period, or **GHS 50,000** over 3 months.
-- **VAT Schemes**:
-  * **Standard Rate Scheme (Effective Rate: ~21.9%)**:
-    1. National Health Insurance Levy (NHIL): **2.5%** on taxable supply.
-    2. Ghana Education Trust Fund (GETFund): **2.5%** on taxable supply.
-    3. COVID-19 Health Recovery Levy: **1.0%** on taxable supply.
-    4. Value Added Tax (VAT): **15.0%** charged on `(Taxable Supply + NHIL + GETFund + COVID-19 Levy)`.
-  * **VAT Flat Rate Scheme (VFRS)**:
-    - Applicable to retail traders and wholesalers of goods: **3% VAT + 1% COVID-19 Levy = 4% flat** on the gross value of goods sold (no input tax deduction).
+### 2. The Ghanaian Value Added Tax (VAT) System (Act 1151 - Effective Jan 1, 2026):
+- **Registration Threshold**: Mandatory for businesses making taxable supplies exceeding **GHS 750,000** over a 12-month period (raised from GHS 200,000 under Act 1151).
+- **Statutory Tax Rates & Simplifications**:
+  * **Unified Standard Rate (20.0% Non-Cascading)**:
+    1. Standard VAT: **15.0%** on base taxable supply.
+    2. National Health Insurance Levy (NHIL): **2.5%** on base taxable supply (input-deductible).
+    3. Ghana Education Trust Fund (GETFund): **2.5%** on base taxable supply (input-deductible).
+    *Total Unified Rate = 15.0% + 2.5% + 2.5% = 20.0% flat on taxable supply (cascading calculation eliminated).*
+  * **Abolished Schemes**:
+    - COVID-19 Health Recovery Levy (1.0%): **Permanently abolished**.
+    - VAT Flat Rate Scheme (VFRS - 3%/4%): **Permanently abolished**; all VAT-registered businesses operate under the unified system.
+  * **Alternative Supply Classifications**:
+    - **EXEMPT**: Non-taxable supplies under the First Schedule of Act 1151.
+    - **ZERO_RATED**: Taxable at 0% (e.g. exports of goods and services).
 
 ### 3. Withholding Tax (WHT):
 - Standard Ghanaian rates applied on supplier disbursements:
@@ -356,7 +361,7 @@ CREATE TABLE organizations (
     phone VARCHAR(20) NOT NULL,                   -- e.g. +233240000000
     email VARCHAR(255) NOT NULL,
     vat_registered BOOLEAN NOT NULL DEFAULT FALSE,
-    vat_scheme VARCHAR(20) DEFAULT 'STANDARD',    -- 'STANDARD' (21.9%) or 'FLAT_RATE' (4%)
+    vat_scheme VARCHAR(20) DEFAULT 'STANDARD',    -- 'STANDARD' (Act 1151 Unified 20.0%), 'EXEMPT', 'ZERO_RATED'
     default_experience_mode VARCHAR(20) DEFAULT 'simple', -- 'simple' or 'full'
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -409,6 +414,7 @@ CREATE TABLE fiscal_periods (
     closed_at TIMESTAMPTZ,
     closed_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
     UNIQUE(organization_id, start_date, end_date)
 );
 
@@ -434,6 +440,7 @@ CREATE TABLE chart_of_accounts (
     currency VARCHAR(3) NOT NULL DEFAULT 'GHS',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
     UNIQUE(organization_id, account_code)
 );
 
@@ -444,7 +451,7 @@ CREATE TABLE chart_of_accounts (
 CREATE TABLE journal_entries (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    period_id UUID NOT NULL REFERENCES fiscal_periods(id),
+    period_id UUID NOT NULL,
     entry_number VARCHAR(50) NOT NULL,                   -- e.g. 'JE-2026-00042'
     entry_date DATE NOT NULL,
     narration TEXT NOT NULL,
@@ -453,7 +460,11 @@ CREATE TABLE journal_entries (
     is_posted BOOLEAN NOT NULL DEFAULT TRUE,
     created_by UUID NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(organization_id, entry_number)
+    UNIQUE(organization_id, id),
+    UNIQUE(organization_id, entry_number),
+    CONSTRAINT fk_journal_entries_period_org
+        FOREIGN KEY (organization_id, period_id)
+        REFERENCES fiscal_periods (organization_id, id)
 );
 
 CREATE TABLE journal_lines (
@@ -484,7 +495,8 @@ CREATE TABLE contacts (
     tin VARCHAR(20),                                      -- Tax Identification Number
     ghana_card_number VARCHAR(25),
     billing_address TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id)
 );
 
 -- ============================================================================
@@ -494,7 +506,7 @@ CREATE TABLE contacts (
 CREATE TABLE invoices (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    customer_id UUID NOT NULL REFERENCES contacts(id),
+    customer_id UUID NOT NULL,
     invoice_number VARCHAR(50) NOT NULL,
     issue_date DATE NOT NULL,
     due_date DATE NOT NULL,
@@ -508,7 +520,11 @@ CREATE TABLE invoices (
     status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',            -- 'DRAFT','PENDING_GRA','CLEARED','PARTIAL','PAID','OVERDUE','VOID'
     gra_clearance_code VARCHAR(100),                        -- GRA E-VAT QR / clearance verification
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(organization_id, invoice_number)
+    UNIQUE(organization_id, id),
+    UNIQUE(organization_id, invoice_number),
+    CONSTRAINT fk_invoices_customer_org
+        FOREIGN KEY (organization_id, customer_id)
+        REFERENCES contacts (organization_id, id)
 );
 
 CREATE TABLE invoice_items (
@@ -528,7 +544,7 @@ CREATE TABLE invoice_items (
 CREATE TABLE bills (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    supplier_id UUID NOT NULL REFERENCES contacts(id),
+    supplier_id UUID NOT NULL,
     bill_number VARCHAR(50) NOT NULL,
     bill_date DATE NOT NULL,
     due_date DATE NOT NULL,
@@ -536,7 +552,11 @@ CREATE TABLE bills (
     withholding_tax_amount NUMERIC(18, 4) NOT NULL DEFAULT 0.0000,
     paid_amount NUMERIC(18, 4) NOT NULL DEFAULT 0.0000,
     status VARCHAR(30) NOT NULL DEFAULT 'UNPAID',          -- 'UNPAID','PARTIAL','PAID','OVERDUE'
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
+    CONSTRAINT fk_bills_supplier_org
+        FOREIGN KEY (organization_id, supplier_id)
+        REFERENCES contacts (organization_id, id)
 );
 
 -- ============================================================================
@@ -552,11 +572,24 @@ CREATE TABLE payment_transactions (
     transaction_date TIMESTAMPTZ NOT NULL,
     reference_number VARCHAR(100),                         -- Bank/MoMo network transaction ID
     terminal_id VARCHAR(50),                               -- POS terminal ID for bank card machines
-    contact_id UUID REFERENCES contacts(id),
-    invoice_id UUID REFERENCES invoices(id),
-    bill_id UUID REFERENCES bills(id),
+    contact_id UUID,
+    invoice_id UUID,
+    bill_id UUID,
     created_by UUID NOT NULL REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
+    CONSTRAINT fk_payment_contact_org
+        FOREIGN KEY (organization_id, contact_id)
+        REFERENCES contacts (organization_id, id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_payment_invoice_org
+        FOREIGN KEY (organization_id, invoice_id)
+        REFERENCES invoices (organization_id, id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_payment_bill_org
+        FOREIGN KEY (organization_id, bill_id)
+        REFERENCES bills (organization_id, id)
+        ON DELETE RESTRICT
 );
 
 -- ============================================================================
@@ -572,13 +605,14 @@ CREATE TABLE employees (
     tin VARCHAR(20),
     basic_salary NUMERIC(18, 4) NOT NULL,
     allowances NUMERIC(18, 4) NOT NULL DEFAULT 0.0000,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id)
 );
 
 CREATE TABLE payroll_runs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    period_id UUID NOT NULL REFERENCES fiscal_periods(id),
+    period_id UUID NOT NULL,
     total_gross_salary NUMERIC(18, 4) NOT NULL,
     total_ssnit_tier1 NUMERIC(18, 4) NOT NULL,             -- 13.5% employer
     total_ssnit_tier2 NUMERIC(18, 4) NOT NULL,             -- 5.0% employee
@@ -586,7 +620,11 @@ CREATE TABLE payroll_runs (
     total_net_payout NUMERIC(18, 4) NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'DRAFT',           -- 'DRAFT','APPROVED','DISBURSED'
     executed_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(organization_id, id),
+    CONSTRAINT fk_payroll_period_org
+        FOREIGN KEY (organization_id, period_id)
+        REFERENCES fiscal_periods (organization_id, id)
 );
 
 -- ============================================================================
@@ -596,15 +634,25 @@ CREATE TABLE payroll_runs (
 CREATE TABLE prior_period_rectifications (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    closed_period_id UUID NOT NULL REFERENCES fiscal_periods(id),
-    target_journal_entry_id UUID REFERENCES journal_entries(id),
-    rectification_journal_id UUID NOT NULL REFERENCES journal_entries(id),
+    closed_period_id UUID NOT NULL,
+    target_journal_entry_id UUID,
+    rectification_journal_id UUID NOT NULL,
     reason TEXT NOT NULL,
     justification_document_url VARCHAR(500),
     requested_by UUID NOT NULL REFERENCES users(id),
     approved_by UUID REFERENCES users(id),
     status VARCHAR(20) NOT NULL DEFAULT 'PENDING',        -- 'PENDING','APPROVED','REJECTED'
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_rectification_period_org
+        FOREIGN KEY (organization_id, closed_period_id)
+        REFERENCES fiscal_periods (organization_id, id),
+    CONSTRAINT fk_rectification_target_je_org
+        FOREIGN KEY (organization_id, target_journal_entry_id)
+        REFERENCES journal_entries (organization_id, id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_rectification_je_org
+        FOREIGN KEY (organization_id, rectification_journal_id)
+        REFERENCES journal_entries (organization_id, id)
 );
 
 -- ============================================================================
@@ -810,6 +858,25 @@ Under Ghana Revenue Authority compliance mandates, VAT-registered businesses mus
   * Calculated levies (NHIL, GETFund, COVID-19) and VAT
 - Transmit to GRA E-VAT API.
 - Store the returned **GRA Clearance Code** and generate a compliant **QR Code** embedded onto the final invoice PDF.
+
+---
+
+## 4.8 Misuse Case Threat Modeling & Automated CI/CD Security Architecture
+
+To guarantee institutional-grade financial security and satisfy Ghanaian regulatory compliance (including the Data Protection Act, Act 843 and Bank of Ghana cybersecurity guidelines), Mage Books incorporates formal Misuse Case Threat Modeling. Rather than relying solely on positive functional requirements, the system defines explicit negative anti-requirements and defensive countermeasures across all transactional entry points:
+
+| Misuse Case ID | Target Asset & Vector | Threat Description & Impact | Defensive Countermeasure | Verification Method |
+| :--- | :--- | :--- | :--- | :--- |
+| **MUC-1.1** | **MoMo Settlement Underpayment** | Attacker sends partial payment (e.g. GHS 1.00 on GHS 1,200 invoice) hoping reference match auto-clears AR balance. | Strict Decimal matching (`amount == invoice.total_amount`). Routes partial payments to `PARTIALLY_PAID` and discrepancies to Suspense Account 2150. | Automated abuse test in `tests/security/test_momo_security.py` |
+| **MUC-1.2** | **Webhook HMAC Signature Forgery** | Attacker submits forged webhook payload to `/api/v1/payments/webhooks/momo/` to credit invoices without depositing fiat funds. | Constant-time HMAC-SHA256 signature verification (`hmac.compare_digest`) rejecting non-matching payloads with HTTP 401 Unauthorized. | Tampered signature test in `tests/security/test_webhook_security.py` |
+| **MUC-2.1** | **Cross-Tenant BOLA/IDOR Header Spoof** | User in Tenant A tampers with `X-Tenant-ID` header sending Tenant B's UUID to inspect competitor financial ledgers. | `TenantSecurityMiddleware` Stages 3-4 verifies active membership in requested tenant; rejects unauthorized cross-tenant requests with HTTP 403. | Cross-tenant penetration test in `tests/security/test_tenancy_security.py` |
+| **MUC-2.2** | **RLS Connection Pool Leak** | Pooled database connection retains previous request's tenant context and leaks to subsequent request on same connection. | Middleware executes `SET LOCAL app.current_tenant_id` inside transaction; connection pool resets session parameter automatically upon transaction end. | Multi-tenant sequential connection leak test in SQLite/Postgres |
+| **MUC-3.1** | **PWA Cache Physical Dump** | Attacker inspects browser IndexedDB / Dexie.js cache on stolen merchant phone to dump customer TINs and sales history. | Client-side field-level encryption using WebCrypto API (AES-GCM 256-bit) for sensitive PII before persisting to local offline cache. | Playwright automated PWA storage inspection test in CI |
+| **MUC-4.1** | **PDF Engine SSRF Vulnerability** | Attacker submits customer name containing `<img src='http://169.254.169.254/latest/meta-data/'>` to leak internal cloud metadata during PDF compile. | Explicit programmatic URL fetcher disabling (`disabled_url_fetcher`) preventing ReportLab/WeasyPrint from performing outbound network calls. | SSRF payload injection test in `tests/security/test_pdf_security.py` |
+| **MUC-5.1** | **Payroll Maker Self-Approval Collusion** | Accountant creates payroll run and attempts to approve own payment disbursal without independent administrative check. | Anti-self-approval validation enforcing `maker_id != checker_id` at model and API view levels; blocks self-approval with HTTP 403 Forbidden. | Self-approval attempt test in `tests/security/test_payroll_security.py` |
+| **MUC-5.2** | **TOTP 2FA Replay & Race Condition** | Attacker intercepts 6-digit TOTP code and replays it within 30s drift window; concurrent approval threads bypass authorization. | Single-use TOTP consumption cache in Redis (60s TTL) plus distributed Redis mutex on `payroll_id` during approval transaction. | Concurrent replay test in `tests/security/test_payroll_security.py` |
+
+These threat vectors are enforced through automated Continuous Integration quality gates (`.github/workflows/security.yml`), combining Gitleaks (secret detection), Bandit (Python SAST), pip-audit (SCA dependency auditing), and a dedicated negative abuse test suite running in SQLite.
 
 ---
 
@@ -1035,27 +1102,27 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    StartSupply([Line Item Taxable Supply: e.g., GHS 1,000.00]) --> SchemeCheck{Business VAT Scheme?}
+    StartSupply([Line Item Taxable Supply: e.g., GHS 1,000.00]) --> ThresholdCheck{VAT Registered? Turnover >= GHS 750,000}
     
-    SchemeCheck -->|Non-VAT Registered| NoTax[No VAT or Levies Applied\nTotal Invoice = GHS 1,000.00]
+    ThresholdCheck -->|No / Non-VAT Registered| NoTax[No VAT or Levies Applied\nTotal Customer Invoice = GHS 1,000.00]
     
-    SchemeCheck -->|Flat Rate Scheme - 4%| FlatRate[Apply Flat Rate\n3% VAT Flat + 1% COVID Levy]
-    FlatRate --> TotalFlat[Tax = GHS 40.00\nTotal Invoice = GHS 1,040.00]
+    ThresholdCheck -->|Yes / VAT Registered| SupplyType{Supply Statutory Status?}
     
-    SchemeCheck -->|Standard Rate Scheme| CalcLevies[Calculate Statutory Levies on Taxable Supply]
+    SupplyType -->|EXEMPT| Exempt[Zero Tax Applied - Exempt Supply\nTotal Customer Invoice = GHS 1,000.00]
+    SupplyType -->|ZERO_RATED| ZeroRated[0.0% Tax Applied - Exports\nTotal Customer Invoice = GHS 1,000.00]
     
-    CalcLevies --> NHIL["NHIL (2.5%): GHS 25.00"]
-    CalcLevies --> GETFund["GETFund (2.5%): GHS 25.00"]
-    CalcLevies --> COVID["COVID-19 Health Levy (1.0%): GHS 10.00"]
+    SupplyType -->|STANDARD Rate| CalcAct1151[Calculate Act 1151 Unified 20.0% Taxes on Base Supply]
     
-    NHIL & GETFund & COVID --> SumLevies[Total Levies = GHS 60.00]
+    CalcAct1151 --> NHIL["NHIL (2.5%): GHS 25.00 (Input-Deductible)"]
+    CalcAct1151 --> GETFund["GETFund (2.5%): GHS 25.00 (Input-Deductible)"]
+    CalcAct1151 --> VAT["Standard VAT (15.0%): GHS 150.00"]
+    CalcAct1151 --> COVID["COVID-19 Levy: GHS 0.00 (Abolished)"]
     
-    SumLevies --> VATBase[Determine Standard VAT Base\nSupply + Levies = GHS 1,060.00]
-    VATBase --> StandardVAT["Calculate Standard VAT (15% on GHS 1,060.00)\nVAT = GHS 159.00"]
+    NHIL & GETFund & VAT & COVID --> SumTaxes[Total Unified Statutory Taxes = GHS 200.00 (20.0% Flat)]
     
-    StandardVAT --> TotalStandard["Total Statutory Taxes = GHS 219.00 (Effective 21.9%)\nTotal Customer Invoice = GHS 1,219.00"]
+    SumTaxes --> TotalStandard["Total Customer Invoice = GHS 1,200.00"]
     
-    TotalStandard --> OutputJournal["Post Double-Entry Ledger Splitting:\n- Dr Accounts Receivable: GHS 1,219.00\n- Cr Sales Revenue: GHS 1,000.00\n- Cr NHIL Payable: GHS 25.00\n- Cr GETFund Payable: GHS 25.00\n- Cr COVID Levy Payable: GHS 10.00\n- Cr VAT Output Tax Payable: GHS 159.00"]
+    TotalStandard --> OutputJournal["Post Double-Entry Ledger Splitting:\n- Dr Accounts Receivable: GHS 1,200.00\n- Cr Sales Revenue: GHS 1,000.00\n- Cr NHIL Output Payable: GHS 25.00\n- Cr GETFund Output Payable: GHS 25.00\n- Cr VAT Output Tax Payable: GHS 150.00"]
 ```
 
 ---

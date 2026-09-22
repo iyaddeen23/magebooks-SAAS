@@ -5,6 +5,7 @@ safe fallback defaults, and automated test routing to in-memory SQLite.
 """
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import environ
@@ -12,22 +13,33 @@ import environ
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 1. Initialize environ with explicit type casting and safe fallback defaults
-env = environ.Env(
-    DJANGO_DEBUG=(bool, False),
-    DJANGO_SECRET_KEY=(str, "django-insecure-magebooks-dev-key-change-in-production"),
-    DJANGO_ALLOWED_HOSTS=(list, ["*"]),
-    DJANGO_CORS_ALLOWED_ORIGINS=(list, ["http://localhost:3000"]),
-)
+# 1. Initialize environ
+env = environ.Env()
 
 # 2. Read .env file from BASE_DIR if present (does not fail if missing)
 environ.Env.read_env(BASE_DIR / ".env")
 
-# 3. Pull Core Variables
-SECRET_KEY = env("DJANGO_SECRET_KEY")
-DEBUG = env("DJANGO_DEBUG")
-ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
-CORS_ALLOWED_ORIGINS = env("DJANGO_CORS_ALLOWED_ORIGINS")
+# 3. Detect Testing and Debug Modes
+IS_TESTING = "test" in sys.argv or "pytest" in sys.modules
+DEBUG = env.bool("DJANGO_DEBUG", default=False)
+
+# 4. Fail-closed Security Defaults for SECRET_KEY, ALLOWED_HOSTS, and CORS:
+# Fallbacks are strictly restricted to automated test runners or explicit local DEBUG=True.
+# In production (DEBUG=False), missing variables cause an immediate startup crash (fail fast).
+if IS_TESTING or DEBUG:
+    SECRET_KEY = env(
+        "DJANGO_SECRET_KEY",
+        default="django-insecure-magebooks-dev-key-change-in-production",
+    )
+    ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["*"])
+    CORS_ALLOWED_ORIGINS = env.list(
+        "DJANGO_CORS_ALLOWED_ORIGINS",
+        default=["http://localhost:3000"],
+    )
+else:
+    SECRET_KEY = env("DJANGO_SECRET_KEY")
+    ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS")
+    CORS_ALLOWED_ORIGINS = env.list("DJANGO_CORS_ALLOWED_ORIGINS")
 
 # Application definition
 INSTALLED_APPS = [
@@ -86,8 +98,6 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 # Database Routing: In-Memory SQLite for Automated Tests, PostgreSQL for Dev/Prod
-IS_TESTING = "test" in sys.argv or "pytest" in sys.modules
-
 if IS_TESTING:
     DATABASES = {
         "default": {
@@ -95,13 +105,19 @@ if IS_TESTING:
             "NAME": ":memory:",
         }
     }
-else:
+    # Fast password hasher to accelerate automated test suite (<2s vs 60s+)
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+elif DEBUG:
+    # Safe fallback for local development with DEBUG=True
     DATABASES = {
         "default": env.db(
             "DATABASE_URL",
             default="postgres://postgres:postgres@localhost:5432/magebooks_db",
         )
     }
+else:
+    # Production strictly requires DATABASE_URL to prevent silent fallback to default credentials
+    DATABASES = {"default": env.db("DATABASE_URL")}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -132,8 +148,17 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # Default primary key field type
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Custom User Model (UUIDv7 primary key, email-based auth)
+AUTH_USER_MODEL = "authentication.CustomUser"
+
 # Django REST Framework
 REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "apps.authentication.authentication.JWTCookieAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
     ],
@@ -141,6 +166,25 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.JSONParser",
     ],
 }
+
+# Simple JWT Configuration
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": False,
+    "BLACKLIST_AFTER_ROTATION": False,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+}
+
+# JWT Cookie Transport Settings
+JWT_AUTH_COOKIE = "access_token"
+JWT_REFRESH_COOKIE = "refresh_token"
+JWT_COOKIE_SECURE = env.bool("JWT_COOKIE_SECURE", default=not DEBUG)
+JWT_COOKIE_SAMESITE = env("JWT_COOKIE_SAMESITE", default="Strict")
 
 # Cloudflare R2 Object Storage (S3-Compatible)
 CLOUDFLARE_R2_ACCESS_KEY_ID = env("R2_ACCESS_KEY_ID", default="")

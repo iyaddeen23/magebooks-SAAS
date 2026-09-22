@@ -12,11 +12,14 @@ dependencies = [
     "django-cors-headers>=4.4",
     "django-storages[s3]>=1.14",
     "boto3>=1.35",
+    "djangorestframework-simplejwt>=5.5.1",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.9.0",
+    "bandit>=1.8.0",
+    "pip-audit>=2.8.0",
 ]
 
 [tool.ruff]
@@ -29,3 +32,7 @@ ignore = []
 
 [tool.ruff.lint.isort]
 known-first-party = ["apps", "config"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/migrations/*" = ["E501"]
+

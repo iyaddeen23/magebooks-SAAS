@@ -1,0 +1,58 @@
+name: Security & Quality Gates
+
+on:
+  push:
+    branches: [ develop, main ]
+  pull_request:
+    branches: [ develop, main ]
+
+jobs:
+  secret-scan:
+    name: "Layer 1: Gitleaks Secret Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Secret Scanner
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  security-and-test-gates:
+    name: "Layers 2-5: SAST, SCA, Lint & Test Gates"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Dependencies
+        run: uv sync
+
+      - name: "Layer 2: Bandit Python SAST Scan"
+        run: uv run bandit -r apps/ config/ -ll -i
+
+      - name: "Layer 3: pip-audit SCA Dependency Audit"
+        run: uv run pip-audit
+
+      - name: "Layer 4: Ruff Code Hygiene & Linting"
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: "Layer 5: In-Memory SQLite Test Suite"
+        run: uv run python manage.py test
