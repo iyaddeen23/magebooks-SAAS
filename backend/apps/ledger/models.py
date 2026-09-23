@@ -3,16 +3,18 @@
 Implements:
 1. FiscalCalendar: Tenant-scoped calendar specifying period length and fiscal year-end date.
 2. FiscalPeriod: Period-locking boundaries for ledger immutability and statutory audit.
-3. AccountCategory: Master accounting classifications (Assets, Liabilities, Equity, Income, Expenses).
+3. AccountCategory: Master classifications (Assets, Liabilities, Equity, Income, Expenses).
 4. ChartOfAccounts: 4-digit hierarchy accounts (1000-5999) with Ghanaian standard mappings.
 """
 
+from typing import Any
+
+import uuid6
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
-import uuid6
 
 from apps.core.models import BaseTenantModel
 
@@ -123,7 +125,7 @@ class FiscalPeriod(BaseTenantModel):
                 name="unique_org_fiscal_period_dates",
             ),
             models.CheckConstraint(
-                check=models.Q(end_date__gte=models.F("start_date")),
+                condition=models.Q(end_date__gte=models.F("start_date")),
                 name="fiscal_period_date_range_valid",
             ),
         ]
@@ -273,6 +275,6 @@ class ChartOfAccounts(BaseTenantModel):
                 raise ValidationError({"parent_account": "An account cannot be its own parent."})
 
     def save(self, *args: Any, **kwargs: Any) -> None:
-        """Runs full_clean() to ensure account invariants are preserved upon persistence."""
-        self.full_clean()
+        """Runs clean() to ensure account invariants are preserved upon persistence."""
+        self.clean()
         super().save(*args, **kwargs)

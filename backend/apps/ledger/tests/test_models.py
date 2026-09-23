@@ -12,7 +12,7 @@ import datetime
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase
 
@@ -217,12 +217,13 @@ class LedgerModelTests(TestCase):
 
         # Duplicate 1010 in Org A must raise IntegrityError
         with self.assertRaises(IntegrityError):
-            ChartOfAccounts.objects.create(
-                organization=self.org_a,
-                account_code="1010",
-                account_name="Duplicate Cash Alpha",
-                category=self.cat_assets,
-            )
+            with transaction.atomic():
+                ChartOfAccounts.objects.create(
+                    organization=self.org_a,
+                    account_code="1010",
+                    account_name="Duplicate Cash Alpha",
+                    category=self.cat_assets,
+                )
 
         # Same 1010 code in Org B must succeed (multi-tenant isolation)
         org_b_account = ChartOfAccounts.objects.create(

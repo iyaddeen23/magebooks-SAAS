@@ -8,7 +8,6 @@ Provides idempotent initialization of:
 
 import calendar
 import datetime
-from typing import Any
 
 from django.db import transaction
 
