@@ -9,8 +9,10 @@ Covers:
 """
 
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -18,6 +20,7 @@ from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.tenancy.middleware import (
+    TenantSecurityMiddleware,
     get_current_tenant,
     get_current_tenant_id,
     get_current_tenant_role,
@@ -282,6 +285,29 @@ class TenancySecurityThreatTests(APITestCase):
         self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
 
         # Assert thread-local context was deallocated in `finally:` block
+        self.assertIsNone(get_current_tenant())
+        self.assertIsNone(get_current_tenant_id())
+        self.assertIsNone(get_current_tenant_role())
+
+    def test_bind_db_session_failure_fails_closed_with_500(self):
+        """Fail-Closed Defense: If database session binding fails, request must return HTTP 500."""
+        self._authenticate(self.user_a)
+        with patch.object(
+            TenantSecurityMiddleware,
+            "_bind_db_session",
+            side_effect=DatabaseError("Simulated PostgreSQL SET LOCAL failure"),
+        ):
+            response = self.client.get(
+                self.context_url,
+                HTTP_X_TENANT_ID=str(self.org_alpha.id),
+            )
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertEqual(
+                response.json().get("detail"),
+                "Failed to establish secure tenant database context.",
+            )
+
+        # Thread-local context must still be cleanly wiped on failure
         self.assertIsNone(get_current_tenant())
         self.assertIsNone(get_current_tenant_id())
         self.assertIsNone(get_current_tenant_role())
