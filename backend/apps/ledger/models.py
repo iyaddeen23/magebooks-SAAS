@@ -7,6 +7,7 @@ Implements:
 4. ChartOfAccounts: 4-digit hierarchy accounts (1000-5999) with Ghanaian standard mappings.
 """
 
+from decimal import Decimal
 from typing import Any
 
 import uuid6
@@ -16,7 +17,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
-from apps.core.models import BaseTenantModel
+from apps.core.models import BaseTenantModel, TenantQuerySet
 
 
 class PeriodLengthChoices(models.TextChoices):
@@ -278,3 +279,316 @@ class ChartOfAccounts(BaseTenantModel):
         """Runs clean() to ensure account invariants are preserved upon persistence."""
         self.clean()
         super().save(*args, **kwargs)
+
+
+class SourceTypeChoices(models.TextChoices):
+    """Statutory and operational origin of the double-entry transaction."""
+
+    MANUAL = "MANUAL", "Manual Journal Entry"
+    INVOICE = "INVOICE", "Customer Invoice"
+    BILL = "BILL", "Vendor Bill"
+    PAYMENT = "PAYMENT", "Payment Receipt / Disbursement"
+    PAYROLL = "PAYROLL", "Payroll Run Disbursal"
+    RECTIFICATION = "RECTIFICATION", "Prior Period Rectification"
+
+
+class JournalEntryQuerySet(TenantQuerySet):
+    """QuerySet enforcing immutability across posted journal entries."""
+
+    def delete(self) -> tuple[int, dict[str, int]]:
+        if self.filter(is_posted=True).exists():
+            raise ValidationError("Cannot delete posted journal entries.")
+        return super().delete()
+
+    def update(self, **kwargs: Any) -> int:
+        if self.filter(is_posted=True).exists():
+            raise ValidationError("Cannot modify posted journal entries.")
+        return super().update(**kwargs)
+
+
+class JournalLineQuerySet(TenantQuerySet):
+    """QuerySet enforcing immutability across lines of posted journal entries."""
+
+    def delete(self) -> tuple[int, dict[str, int]]:
+        if self.filter(journal_entry__is_posted=True).exists():
+            raise ValidationError("Cannot delete lines belonging to a posted journal entry.")
+        return super().delete()
+
+    def update(self, **kwargs: Any) -> int:
+        if self.filter(journal_entry__is_posted=True).exists():
+            raise ValidationError("Cannot modify lines belonging to a posted journal entry.")
+        return super().update(**kwargs)
+
+
+class JournalEntry(BaseTenantModel):
+    """Double-entry General Ledger transaction header.
+
+    Strictly immutable once posted (is_posted=True).
+    """
+
+    period = models.ForeignKey(
+        FiscalPeriod,
+        on_delete=models.PROTECT,
+        related_name="journal_entries",
+        help_text="Fiscal period governing this accounting transaction.",
+    )
+    entry_number = models.CharField(
+        max_length=50,
+        help_text="Tenant-scoped unique identifier (e.g. 'JE-2026-00042').",
+    )
+    entry_date = models.DateField(
+        help_text="Formal transaction date for accounting recognition.",
+    )
+    narration = models.TextField(
+        help_text="Business description and audit explanation of the transaction.",
+    )
+    source_type = models.CharField(
+        max_length=50,
+        choices=SourceTypeChoices.choices,
+        default=SourceTypeChoices.MANUAL,
+        help_text="Originating operational subsystem.",
+    )
+    source_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Polymorphic UUID reference to originating document (Invoice, Payment, etc.).",
+    )
+    is_posted = models.BooleanField(
+        default=True,
+        help_text="Immutability lock. Posted entries cannot be updated or deleted via SQL.",
+    )
+    posted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when entry was committed to the general ledger.",
+    )
+    posted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="posted_journal_entries",
+        help_text="User who authorized or posted the entry. Null for automated machine events.",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_journal_entries",
+        help_text="User who drafted the entry. Null for automated machine events.",
+    )
+
+    objects = JournalEntryQuerySet.as_manager()
+
+    class Meta(BaseTenantModel.Meta):
+        db_table = "journal_entries"
+        verbose_name = "Journal Entry"
+        verbose_name_plural = "Journal Entries"
+        ordering = ["-entry_date", "-created_at"]
+        constraints = BaseTenantModel.Meta.constraints + [
+            models.UniqueConstraint(
+                fields=["organization", "entry_number"],
+                name="unique_org_journal_entry_number",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.entry_number} ({self.entry_date}) [{self.source_type}]"
+
+    def clean(self) -> None:
+        super().clean()
+
+        if self.period:
+            if self.period.organization_id != self.organization_id:
+                raise ValidationError(
+                    {"period": "Fiscal period must belong to the same organization."}
+                )
+            if self.entry_date and not (
+                self.period.start_date <= self.entry_date <= self.period.end_date
+            ):
+                raise ValidationError(
+                    {
+                        "entry_date": (
+                            f"Entry date {self.entry_date} falls outside fiscal period "
+                            f"'{self.period.period_name}' "
+                            f"({self.period.start_date} to {self.period.end_date})."
+                        )
+                    }
+                )
+            # Safeguard 1: Restrict is_closed validation strictly to new entries being added
+            if self._state.adding and self.period.is_closed:
+                raise ValidationError(
+                    {"period": "Cannot post transaction to a closed fiscal period."}
+                )
+
+        if not self._state.adding and self.pk:
+            orig = (
+                JournalEntry.objects.filter(pk=self.pk)
+                .values(
+                    "is_posted",
+                    "entry_number",
+                    "entry_date",
+                    "period_id",
+                    "narration",
+                    "source_type",
+                    "source_id",
+                    "organization_id",
+                )
+                .first()
+            )
+            if (
+                orig
+                and orig["is_posted"]
+                and (
+                    self.entry_number != orig["entry_number"]
+                    or self.entry_date != orig["entry_date"]
+                    or self.period_id != orig["period_id"]
+                    or self.narration != orig["narration"]
+                    or self.source_type != orig["source_type"]
+                    or self.source_id != orig["source_id"]
+                    or self.organization_id != orig["organization_id"]
+                )
+            ):
+                raise ValidationError("Posted journal entries are strictly immutable.")
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if not self._state.adding and self.pk:
+            orig = JournalEntry.objects.filter(pk=self.pk).values("is_posted").first()
+            if orig and orig["is_posted"]:
+                raise ValidationError("Posted journal entries are strictly immutable.")
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
+        if self.is_posted:
+            raise ValidationError("Cannot delete a posted journal entry.")
+        return super().delete(*args, **kwargs)
+
+
+class JournalLine(BaseTenantModel):
+    """Individual debit or credit ledger line belonging to a JournalEntry."""
+
+    journal_entry = models.ForeignKey(
+        JournalEntry,
+        on_delete=models.CASCADE,
+        related_name="lines",
+        help_text="Parent journal entry header.",
+    )
+    account = models.ForeignKey(
+        ChartOfAccounts,
+        on_delete=models.PROTECT,
+        related_name="journal_lines",
+        help_text="Target general ledger account.",
+    )
+    description = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Line-item memo or specific transaction detail.",
+    )
+    debit_amount = models.DecimalField(
+        max_digits=18,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Debit value in tenant base currency (GHS).",
+    )
+    credit_amount = models.DecimalField(
+        max_digits=18,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Credit value in tenant base currency (GHS).",
+    )
+
+    objects = JournalLineQuerySet.as_manager()
+
+    class Meta(BaseTenantModel.Meta):
+        db_table = "journal_lines"
+        verbose_name = "Journal Line"
+        verbose_name_plural = "Journal Lines"
+        ordering = ["created_at"]
+        constraints = BaseTenantModel.Meta.constraints + [
+            models.CheckConstraint(
+                condition=models.Q(debit_amount__gte=Decimal("0.0000"))
+                & models.Q(credit_amount__gte=Decimal("0.0000")),
+                name="jline_check_positive_values",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(debit_amount__gt=Decimal("0.0000"), credit_amount=Decimal("0.0000"))
+                    | models.Q(credit_amount__gt=Decimal("0.0000"), debit_amount=Decimal("0.0000"))
+                ),
+                name="jline_check_either_debit_or_credit",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["organization", "account", "debit_amount", "credit_amount"],
+                name="idx_jl_org_acc_deb_cred",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        if self.debit_amount > Decimal("0.0000"):
+            return f"Dr {self.account.account_code} - GHS {self.debit_amount}"
+        return f"Cr {self.account.account_code} - GHS {self.credit_amount}"
+
+    def clean(self) -> None:
+        super().clean()
+
+        if self.journal_entry_id and self.journal_entry.organization_id != self.organization_id:
+            raise ValidationError(
+                {
+                    "journal_entry": (
+                        "Journal line organization must match journal entry organization."
+                    )
+                }
+            )
+
+        if self.account_id and self.account.organization_id != self.organization_id:
+            raise ValidationError(
+                {"account": "Account must belong to the same organization as the journal line."}
+            )
+
+        if self.debit_amount == Decimal("0.0000") and self.credit_amount == Decimal("0.0000"):
+            raise ValidationError(
+                "Journal line must have either a positive debit or credit amount."
+            )
+
+        if self.debit_amount > Decimal("0.0000") and self.credit_amount > Decimal("0.0000"):
+            raise ValidationError("Journal line cannot have both debit and credit amounts.")
+
+        if (
+            not self._state.adding
+            and self.pk
+            and self.journal_entry_id
+            and self.journal_entry.is_posted
+        ):
+            orig = (
+                JournalLine.objects.filter(pk=self.pk)
+                .values("account_id", "debit_amount", "credit_amount", "description")
+                .first()
+            )
+            if orig and (
+                self.account_id != orig["account_id"]
+                or self.debit_amount != orig["debit_amount"]
+                or self.credit_amount != orig["credit_amount"]
+                or self.description != orig["description"]
+            ):
+                raise ValidationError("Cannot modify lines belonging to a posted journal entry.")
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if (
+            not self._state.adding
+            and self.pk
+            and self.journal_entry_id
+            and self.journal_entry.is_posted
+        ):
+            raise ValidationError("Cannot modify lines belonging to a posted journal entry.")
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
+        if self.journal_entry_id and self.journal_entry.is_posted:
+            raise ValidationError("Cannot delete lines belonging to a posted journal entry.")
+        return super().delete(*args, **kwargs)

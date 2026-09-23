@@ -1,8 +1,17 @@
 """Django admin configuration for Ledger Foundation models."""
 
+from typing import Any
+
 from django.contrib import admin
 
-from apps.ledger.models import AccountCategory, ChartOfAccounts, FiscalCalendar, FiscalPeriod
+from apps.ledger.models import (
+    AccountCategory,
+    ChartOfAccounts,
+    FiscalCalendar,
+    FiscalPeriod,
+    JournalEntry,
+    JournalLine,
+)
 
 
 @admin.register(AccountCategory)
@@ -67,3 +76,58 @@ class ChartOfAccountsAdmin(admin.ModelAdmin):
     search_fields = ("account_code", "account_name", "simple_label", "organization__name")
     raw_id_fields = ("organization", "category", "parent_account")
     ordering = ("account_code",)
+
+
+class JournalLineInline(admin.TabularInline):
+    """Tabular inline for line items of a journal entry."""
+
+    model = JournalLine
+    extra = 0
+    fields = ("account", "debit_amount", "credit_amount", "description")
+    raw_id_fields = ("account", "organization")
+
+    def has_add_permission(self, request: Any, obj: Any = None) -> bool:
+        if obj and obj.is_posted:
+            return False
+        return super().has_add_permission(request, obj)
+
+    def has_delete_permission(self, request: Any, obj: Any = None) -> bool:
+        if obj and obj.is_posted:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def has_change_permission(self, request: Any, obj: Any = None) -> bool:
+        if obj and obj.is_posted:
+            return False
+        return super().has_change_permission(request, obj)
+
+
+@admin.register(JournalEntry)
+class JournalEntryAdmin(admin.ModelAdmin):
+    """Admin configuration for Journal Entries."""
+
+    list_display = (
+        "entry_number",
+        "organization",
+        "entry_date",
+        "period",
+        "source_type",
+        "is_posted",
+        "created_by",
+        "created_at",
+    )
+    list_filter = ("is_posted", "source_type", "organization")
+    search_fields = ("entry_number", "narration", "organization__name")
+    raw_id_fields = ("organization", "period", "posted_by", "created_by")
+    inlines = [JournalLineInline]
+    ordering = ("-entry_date", "-created_at")
+
+    def has_delete_permission(self, request: Any, obj: Any = None) -> bool:
+        if obj and obj.is_posted:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def has_change_permission(self, request: Any, obj: Any = None) -> bool:
+        if obj and obj.is_posted:
+            return False
+        return super().has_change_permission(request, obj)
