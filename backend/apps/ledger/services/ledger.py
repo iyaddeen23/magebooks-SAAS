@@ -131,8 +131,8 @@ class LedgerService:
             if not account_raw:
                 raise ValidationError(f"Line {idx + 1} must specify an account.")
 
-            raw_debit = line.get("debit_amount", Decimal("0.0000"))
-            raw_credit = line.get("credit_amount", Decimal("0.0000"))
+            raw_debit = line.get("debit_amount", line.get("debit", Decimal("0.0000")))
+            raw_credit = line.get("credit_amount", line.get("credit", Decimal("0.0000")))
 
             try:
                 debit = Decimal(str(raw_debit)).quantize(Decimal("0.0001"))
