@@ -31,6 +31,7 @@ class ContactAdmin(admin.ModelAdmin):
 class InvoiceAdmin(admin.ModelAdmin):
     list_display = [
         "invoice_number",
+        "payment_reference",
         "customer_name",
         "status",
         "issue_date",
@@ -40,7 +41,13 @@ class InvoiceAdmin(admin.ModelAdmin):
         "organization",
     ]
     list_filter = ["status", "organization", "issue_date"]
-    search_fields = ["invoice_number", "customer_name", "customer_tin", "gra_clearance_code"]
+    search_fields = [
+        "invoice_number",
+        "payment_reference",
+        "customer_name",
+        "customer_tin",
+        "gra_clearance_code",
+    ]
     inlines = [InvoiceLineInline]
     readonly_fields = [
         "share_token",

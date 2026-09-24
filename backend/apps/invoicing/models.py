@@ -95,6 +95,22 @@ class Contact(BaseTenantModel):
             )
         ]
 
+    def clean(self) -> None:
+        super().clean()
+        from apps.invoicing.validators import validate_ghana_card, validate_gra_tin
+
+        if self.tin:
+            try:
+                self.tin = validate_gra_tin(self.tin)
+            except ValidationError as exc:
+                raise ValidationError({"tin": exc.message}) from exc
+
+        if self.ghana_card_number:
+            try:
+                self.ghana_card_number = validate_ghana_card(self.ghana_card_number)
+            except ValidationError as exc:
+                raise ValidationError({"ghana_card_number": exc.message}) from exc
+
     def __str__(self) -> str:
         return f"{self.name} ({self.get_contact_type_display()}) [{self.organization.name}]"
 
@@ -124,6 +140,12 @@ class Invoice(BaseTenantModel, PublicShareableMixin):
         max_length=50,
         db_index=True,
         help_text="Unique sequence reference or Luhn check number.",
+    )
+    payment_reference = models.CharField(
+        max_length=20,
+        blank=True,
+        db_index=True,
+        help_text="Compact numeric sequence with Luhn check-digit for USSD and MoMo.",
     )
     issue_date = models.DateField(
         db_index=True,
@@ -358,7 +380,26 @@ class Invoice(BaseTenantModel, PublicShareableMixin):
                         "Customer legal snapshot cannot be altered on an issued invoice."
                     )
 
+        # 4. Luhn Check-Digit Payment Reference Validation
+        if self.payment_reference:
+            from apps.invoicing.utils import LuhnValidator
+
+            if not LuhnValidator.validate(self.payment_reference):
+                raise ValidationError(
+                    {
+                        "payment_reference": (
+                            "Invalid payment reference: failed Luhn check-digit verification."
+                        )
+                    }
+                )
+
     def save(self, *args: Any, **kwargs: Any) -> None:
+        # Auto-generate Luhn-protected payment reference if blank
+        if not self.payment_reference and self.organization_id:
+            from apps.invoicing.utils import generate_invoice_payment_reference
+
+            self.payment_reference = generate_invoice_payment_reference(self.organization)
+
         # Auto-freeze snapshot on initial save or when transitioning from DRAFT
         if self.customer and (not self.snapshot_frozen_at or not self.customer_name):
             self.freeze_customer_snapshot()
