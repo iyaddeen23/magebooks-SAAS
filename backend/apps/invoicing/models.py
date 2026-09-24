@@ -145,7 +145,9 @@ class Invoice(BaseTenantModel, PublicShareableMixin):
         max_length=20,
         blank=True,
         db_index=True,
-        help_text="Compact numeric sequence with Luhn check-digit for USSD and MoMo.",
+        help_text=(
+            "Compact numeric sequence with Luhn check-digit for USSD and MoMo reconciliation."
+        ),
     )
     issue_date = models.DateField(
         db_index=True,
