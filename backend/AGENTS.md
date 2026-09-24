@@ -16,7 +16,7 @@ Mage Books is a specialized enterprise accounting, invoicing, and statutory tax 
 
 ## 1. Golden Operational Directives (Strict Rules for Agents)
 
-Every autonomous coding agent working in this repository must strictly adhere to these 6 rules:
+Every autonomous coding agent working in this repository must strictly adhere to these 7 rules:
 
 1. **Feature-by-Feature Branching, PR Merge Gate & Cleanup Protocol:**
    * Never implement multiple features at once.
@@ -56,6 +56,10 @@ Every autonomous coding agent working in this repository must strictly adhere to
    * **Strict Virtual Environment Execution**: NEVER run `python` or `manage.py` directly using system/global Python. Always execute all backend scripts, management commands, and test runners through `uv run` (e.g. `uv run python manage.py <command>`) or from within the active virtual environment (`.venv`). Running with global Python will trigger `ModuleNotFoundError` for project dependencies.
    * Use `uv` (`uv init`, `uv add`, `uv run`, `uv sync`) for all Python package management.
    * Enforce linting and formatting via `uv run ruff check .` and `uv run ruff format .` prior to every commit.
+7. **Exhaustive Documentation Review & Future-Proofing Analysis in Implementation Plans:**
+   * **Zero Missed Context**: Before drafting an implementation plan or writing code for any new task or feature, the agent MUST thoroughly examine all specification files in `docs/` (`DETAILED_DOCUMENTATION.md`, `Architecture Manual`, `Master 5-Sprint Implementation Plan`, `Sequence Diagrams & Lifecycle Specification`, `OVERVIEW.md`, etc.). The agent must ensure no detail, statutory requirement, accounting rule, or database constraint is overlooked.
+   * **Forward-Looking Impact & Breakage Analysis**: The agent MUST actively inspect upcoming sprint features and downstream integrations (e.g., Invoicing, Mobile Money webhooks, GRA E-VAT clearance, General Ledger balancing, Audit/PBC package generation, multi-currency, and RBAC) to verify that current implementations will not break future systems or create technical debt.
+   * **Mandatory Plan & Approval Gate**: The implementation plan must document this future-proofing analysis (highlighting potential future breakage points and concrete architectural safeguards) and be presented in `implementation_plan.md` with proposed solutions or options for explicit user approval before modifying code.
 
 ---
 
