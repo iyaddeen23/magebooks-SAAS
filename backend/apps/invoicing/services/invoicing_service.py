@@ -248,8 +248,6 @@ class InvoicingService:
             )
 
         # Reconstruct TaxBreakdown from stored invoice totals
-        from apps.tax.services import TaxBreakdown
-
         tax_breakdown = TaxBreakdown(
             taxable_amount=invoice.subtotal_amount,
             vat_amount=invoice.vat_amount,

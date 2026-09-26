@@ -9,6 +9,7 @@ Provides:
 from typing import Any
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -22,6 +23,7 @@ from apps.invoicing.serializers import (
     InvoiceListSerializer,
 )
 from apps.invoicing.services import InvoicingService
+from apps.invoicing.services.pdf_service import InvoicePDFService
 from apps.tenancy.middleware import get_current_tenant, get_current_tenant_role
 from apps.tenancy.models import Organization, RoleChoices
 
@@ -182,3 +184,96 @@ class InvoiceIssueAPIView(APIView):
 
         serializer = InvoiceDetailSerializer(issued_invoice)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class InvoiceDownloadAPIView(APIView):
+    """Retrieves a presigned download URL or streams raw binary PDF for an invoice."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request, pk: Any) -> Response | HttpResponse:
+        """Generates 15-minute presigned download URL or streams binary PDF."""
+        tenant = resolve_request_tenant(request)
+        if not tenant:
+            return Response(
+                {"detail": "No active tenant organization context found."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        invoice = (
+            Invoice.objects.filter(id=pk, organization=tenant)
+            .select_related("customer", "organization")
+            .prefetch_related("lines")
+            .first()
+        )
+        if not invoice:
+            return Response(
+                {"detail": "Invoice not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Binary stream option for programmatic downloads / PDF viewers
+        if request.query_params.get("stream", "").lower() == "true":
+            pdf_bytes = InvoicePDFService.get_invoice_pdf_raw_bytes(invoice)
+            response = HttpResponse(pdf_bytes, content_type="application/pdf")
+            response["Content-Disposition"] = f'inline; filename="{invoice.invoice_number}.pdf"'
+            return response
+
+        # Default: 15-minute presigned download URL
+        download_url = InvoicePDFService.get_invoice_pdf_download_url(invoice, expires_in=900)
+        return Response(
+            {
+                "invoice_id": str(invoice.id),
+                "invoice_number": invoice.invoice_number,
+                "download_url": download_url,
+                "expires_in": 900,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class InvoiceGeneratePDFAPIView(APIView):
+    """Explicitly triggers compilation and upload of the invoice PDF to R2."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request, pk: Any) -> Response:
+        """Compiles invoice PDF, uploads to R2, updates pdf_url, and returns download DTO."""
+        tenant = resolve_request_tenant(request)
+        if not tenant:
+            return Response(
+                {"detail": "No active tenant organization context found."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        role = getattr(request, "tenant_role", None) or get_current_tenant_role()
+        if role == RoleChoices.AUDITOR:
+            return Response(
+                {"detail": "Auditor role has strictly read-only access."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        invoice = (
+            Invoice.objects.filter(id=pk, organization=tenant)
+            .select_related("customer", "organization")
+            .prefetch_related("lines")
+            .first()
+        )
+        if not invoice:
+            return Response(
+                {"detail": "Invoice not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        download_url, storage_key = InvoicePDFService.generate_and_upload_invoice_pdf(invoice)
+        return Response(
+            {
+                "detail": "Invoice PDF compiled and uploaded successfully.",
+                "invoice_id": str(invoice.id),
+                "invoice_number": invoice.invoice_number,
+                "storage_key": storage_key,
+                "download_url": download_url,
+                "expires_in": 900,
+            },
+            status=status.HTTP_200_OK,
+        )
