@@ -24,6 +24,7 @@ from apps.payments.gateways import (
     get_payment_gateway,
 )
 from apps.payments.models import PaymentWebhookLog, WebhookStatusChoices
+from apps.payments.services.idempotency import IdempotencyService
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ class BaseWebhookReceiverView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        # 5. Normalization & Audit Logging
+        # 5. Normalization & Event Parsing
         try:
             event = gateway.parse_webhook(payload)
         except Exception as exc:
@@ -123,7 +124,42 @@ class BaseWebhookReceiverView(APIView):
             )
             return Response({"status": "received"}, status=status.HTTP_200_OK)
 
-        # Record verified audit log
+        # 6. Distributed Atomic Idempotency Lock (SET momo:evt:{provider}:{event_id} EX 60 NX)
+        lock_key = IdempotencyService.format_event_key(
+            provider=gateway.provider_name,
+            event_id=event.event_id,
+            raw_body=raw_body,
+        )
+        acquired = IdempotencyService.acquire_lock(lock_key)
+        if not acquired:
+            logger.info(
+                f"[{gateway.provider_name}] Duplicate webhook detected for lock '{lock_key}'. "
+                "Discarding with HTTP 200 without reprocessing."
+            )
+            PaymentWebhookLog.objects.create(
+                provider=gateway.provider_name,
+                event_id=event.event_id,
+                event_type=payload.get("event", "payment_callback"),
+                signature_header=signature,
+                status=WebhookStatusChoices.IGNORED,
+                payload=payload,
+                headers=headers_snapshot,
+                error_message=f"Duplicate event discarded: idempotency lock active on '{lock_key}'",
+            )
+            return Response(
+                {
+                    "status": "ignored",
+                    "detail": "Duplicate webhook event already processed or in progress.",
+                    "event_id": event.event_id,
+                    "provider": gateway.provider_name,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # 7. Downstream Event Processing & Reconciliation Hook (Feature 4.3)
+        self.process_payment_event(event)
+
+        # 8. Record Verified Audit Log
         PaymentWebhookLog.objects.create(
             provider=gateway.provider_name,
             event_id=event.event_id,
@@ -148,6 +184,11 @@ class BaseWebhookReceiverView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    def process_payment_event(self, event: Any) -> None:
+        """Hook for downstream reconciliation and general ledger posting (Feature 4.3)."""
+        # In Feature 4.3, this will delegate to ReconciliationService.reconcile_payment(event)
+        pass
 
 
 class MomoWebhookView(BaseWebhookReceiverView):
