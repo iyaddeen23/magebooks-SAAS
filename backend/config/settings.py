@@ -198,3 +198,8 @@ PAYSTACK_SECRET_KEY = env("PAYSTACK_SECRET_KEY", default="sk_test_mock_paystack_
 HUBTEL_CLIENT_SECRET = env("HUBTEL_CLIENT_SECRET", default="mock_hubtel_secret_key")
 MOMO_WEBHOOK_SECRET = env("MOMO_WEBHOOK_SECRET", default="mock_momo_webhook_secret_key")
 ACTIVE_PAYMENT_GATEWAY = env("ACTIVE_PAYMENT_GATEWAY", default="mock")
+
+# Redis & Distributed Idempotency Configuration
+REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")
+IDEMPOTENCY_LOCK_TTL = env.int("IDEMPOTENCY_LOCK_TTL", default=60)
+USE_MOCK_REDIS = env.bool("USE_MOCK_REDIS", default=IS_TESTING or DEBUG)
