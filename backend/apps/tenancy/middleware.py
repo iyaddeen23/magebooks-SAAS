@@ -62,6 +62,7 @@ class TenantSecurityMiddleware:
     # URL prefixes exempt from tenant-header validation
     EXEMPT_PATH_PREFIXES = (
         "/api/v1/auth/",
+        "/api/v1/payments/webhooks/",
         "/admin/",
         "/health/",
         "/static/",

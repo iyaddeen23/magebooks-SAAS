@@ -192,3 +192,9 @@ CLOUDFLARE_R2_ACCESS_KEY_ID = env("R2_ACCESS_KEY_ID", default="")
 CLOUDFLARE_R2_SECRET_ACCESS_KEY = env("R2_SECRET_ACCESS_KEY", default="")
 CLOUDFLARE_R2_BUCKET_NAME = env("R2_BUCKET_NAME", default="magebooks-prod")
 CLOUDFLARE_R2_ENDPOINT_URL = env("R2_ENDPOINT_URL", default="")
+
+# Payment Gateway & Webhook Secrets
+PAYSTACK_SECRET_KEY = env("PAYSTACK_SECRET_KEY", default="sk_test_mock_paystack_secret_key")
+HUBTEL_CLIENT_SECRET = env("HUBTEL_CLIENT_SECRET", default="mock_hubtel_secret_key")
+MOMO_WEBHOOK_SECRET = env("MOMO_WEBHOOK_SECRET", default="mock_momo_webhook_secret_key")
+ACTIVE_PAYMENT_GATEWAY = env("ACTIVE_PAYMENT_GATEWAY", default="mock")
